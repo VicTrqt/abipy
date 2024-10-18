@@ -164,7 +164,7 @@ install_requires = [
     "ipython",
     "chart-studio",
     "click",
-    "phonopy",
+    #"phonopy",
     "ase",
     #"custodian",
     #pydantic,

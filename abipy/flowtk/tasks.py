@@ -4450,7 +4450,7 @@ class OpticTask(Task):
     color_rgb = np.array((255, 204, 102)) / 255
 
     def __init__(self, optic_input: OpticInput, nscf_node: Node, ddk_nodes: list[Node],
-                 use_ddknc=False, workdir=None, manager=None):
+            use_ddknc=False, use_evknc=False, workdir=None, manager=None):
         """
         Create an instance of :class:`OpticTask` from n string containing the input.
 
@@ -4465,12 +4465,17 @@ class OpticTask(Task):
         # Convert paths to FileNodes
         self.nscf_node = Node.as_node(nscf_node)
         self.ddk_nodes = [Node.as_node(n) for n in ddk_nodes]
-        assert len(ddk_nodes) == 3
+        if use_evknc==False:
+            assert len(ddk_nodes) == 3
+        else:
+            assert len(ddk_nodes) == 1
         #print(self.nscf_node, self.ddk_nodes)
 
         # Use DDK extension instead of 1WF
         if use_ddknc:
             deps = {n: "DDK.nc" for n in self.ddk_nodes}
+        elif use_evknc:
+            deps = {self.ddk_nodes[0]: [f"{idx}_EVK.nc" for idx in [1,2,3]]}
         else:
             deps = {n: "1WF" for n in self.ddk_nodes}
 
@@ -4526,7 +4531,12 @@ class OpticTask(Task):
     def ddk_filepaths(self) -> list[str]:
         """Returns (at runtime) the absolute path of the DDK files produced by the DDK runs."""
         # This to support new version of optic that used DDK.nc
-        paths = [ddk_task.outdir.has_abiext("DDK.nc") for ddk_task in self.ddk_nodes]
+        if len(self.ddk_nodes)==3:
+            paths = [ddk_task.outdir.has_abiext("DDK.nc") for ddk_task in self.ddk_nodes]
+        # This is to support the use of EVK instead of DDK
+        elif len(self.ddk_nodes)==1:
+            paths = [self.ddk_nodes[0].outdir.has_abiext(ext_evk) for ext_evk in ["1_EVK.nc","2_EVK.nc","3_EVK.nc"]]
+
         if all(p for p in paths):
             return paths
 
