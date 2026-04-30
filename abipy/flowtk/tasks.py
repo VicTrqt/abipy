@@ -2118,7 +2118,7 @@ class Task(Node, metaclass=abc.ABCMeta):
         if not self.output_file.exists:
             #self.history.debug("output_file does not exists")
             if not self.stderr_file.exists and not self.qerr_file.exists:
-                # No output at allThe job is still in the queue.
+                # No output at all. The job is still in the queue.
                 return self.status
 
         # 7) Analyze the files of the resource manager and abinit and execution err (mvs)
@@ -2834,6 +2834,7 @@ class AbinitTask(Task):
         logs = []
         if self.output_file.exists: logs.append(rename_file(self.output_file))
         if self.log_file.exists: logs.append(rename_file(self.log_file))
+        if self.stderr_file.exists: logs.append(rename_file(self.stderr_file))
 
         if logs:
             self.history.info("\n".join(logs))
@@ -5145,7 +5146,7 @@ class AtdepTask(Task):
 
     # ========================== CODING LINE ================================ #
 
-    def __init__(self, atdep_input, hist_node, workdir=None, manager=None):
+    def __init__(self, atdep_input, hist_node, ddb_node=None, workdir=None, manager=None):
         """
         Create an instance of AtdepTask from a string containing the input.
 
@@ -5153,12 +5154,19 @@ class AtdepTask(Task):
             atdep_input: |AtdepInput| object.
             hist_node: The node that will produce the HIST file.
                        Accept |Task|, |Work| or filepath.
+            ddb_node: The node that will produce the DDB file.
+                       Accept |Task|, |Work| or filepath.
             workdir: Path to the working directory (optional).
             manager: |TaskManager| object (optional).
         """
         # Keep a reference to the nodes.
         self.hist_node = Node.as_node(hist_node)
         deps = {self.hist_node: "HIST"}
+        if ddb_node is None:
+            self.ddb_node = None
+        else:
+            self.ddb_node = Node.as_node(ddb_node)
+            deps[self.ddb_node] = "DDB"
 
         super().__init__(input=atdep_input, workdir=workdir,
                          manager=manager, deps=deps)
@@ -5178,12 +5186,29 @@ class AtdepTask(Task):
         path = self.hist_node.outdir.has_abiext("HIST.nc")
         return path if path else None
 
+    @property
+    def ddb_filepath(self) -> str:
+        """Returns (at runtime) the absolute path of the input DDB file."""
+        if self.ddb_node is None:
+            return None
+        if isinstance(self.ddb_node, FileNode):
+            return self.ddb_node.filepath
+        path = self.ddb_node.outdir.has_abiext("DDB.nc")
+        if path:
+            return path
+        path = self.ddb_node.outdir.has_abiext("DDB")
+        if path:
+            return path
+        return None
+
     def setup(self):
         """Public method called before submitting the task."""
         pass
 
     def make_links(self):
         self.inlink_file(self.hist_filepath)
+        if self.ddb_filepath is not None:
+            self.inlink_file(self.ddb_filepath)
 
     def outpath_from_ext(self, ext):
         path = self.outdir.has_abiext(ext)

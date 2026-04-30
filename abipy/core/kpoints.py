@@ -1898,7 +1898,7 @@ class Ktables:
         for ik_bz, ir_gp_id in enumerate(mapping):
             inds = np.where(uniq == ir_gp_id)
             assert len(inds) == 1
-            self.bz2ibz[ik_bz] = int(inds[0])
+            self.bz2ibz[ik_bz] = int(inds[0].item())
 
     def __str__(self):
         return self.to_string()
@@ -1938,7 +1938,7 @@ def dist_point_from_line(x0, x1, x2):
     return numerabs / denomabs
 
 
-def find_points_along_path(cart_bounds, cart_coords, dist_tol):
+def find_points_along_path(cart_bounds, cart_coords, dist_tol: float):
     """
     Find points in ``cart_coords`` lying on the path defined by ``cart_bounds``.
     Result are ordered according to distance along the path.
