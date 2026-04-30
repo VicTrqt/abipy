@@ -15,7 +15,6 @@ from functools import cached_property
 from monty.collections import dict2namedtuple
 from monty.string import list_strings, marquee
 from monty.termcolor import cprint
-#from abipy.core.func1d import Function1D
 from abipy.core.structure import Structure
 from abipy.core.mixins import AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter
 from abipy.core.kpoints import Kpoint, KpointList, Kpath, IrredZone, has_timrev_from_kptopt
@@ -336,7 +335,7 @@ class GwrSelfEnergy(SelfEnergy):
             # Fit values for tau < 0, tau > 0 with two exponentials with real argument
             # and remove them from the signal.
             # Use Pade' to perform the AC of the difference and add analytic transform.
-            # Trasform F(i tau) --> F(i ww) using minimax_mesh and inhomogeneous FT.
+            # Transform F(i tau) --> F(i ww) using minimax_mesh and inhomogeneous FT.
             # Ordering is first negative then positive tau values.
             fit = self.get_exp_tau_fit()
             diff_tau = self.c_tau.values - fit.values
@@ -395,7 +394,7 @@ class GwrSelfEnergy(SelfEnergy):
 
         if ref_data is not None:
             ax_re.plot(ref_data.w_vals, ref_data.sigxc_w.real, label="Ref")
-            ax_im.plot(ref_data.w_vals, ref_data.sifxc_w.imag, lable="Ref")
+            ax_im.plot(ref_data.w_vals, ref_data.sifxc_w.imag, label="Ref")
             #ax_aw.plot(ref_data.w_vals, ref_data.aw, label="Ref")
 
         for ax in ax_list:
@@ -470,6 +469,11 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
     def completed(self) -> bool:
         """True if GWR calculation completed."""
         return bool(self.r.read_value("gwr_completed", default=1))
+    
+    @cached_property
+    def scf_iteration(self) -> int:
+        """The number of SCF iterations performed in the self-consistent calculation."""
+        return int(self.r.read_value("scf_iteration", default=1))
 
     @property
     def sigma_kpoints(self) -> KpointList:
@@ -493,6 +497,14 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
         Shape: [nsppol, nkcalc]
         """
         return self.r.read_value("qpz_gaps") * abu.Ha_eV
+
+    # @cached_property
+    # def qp_pade_dirgaps(self) -> np.ndarray:
+    #     """
+    #     QP direct gaps in eV computed with the quasi-particle equation
+    #     Shape: [nsppol, nkcalc]
+    #     """
+    #     return self.r.read_value("qp_pade_gaps") * abu.Ha_eV
 
     @cached_property
     def minimax_mesh(self) -> MinimaxMesh:
@@ -610,6 +622,14 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
             keys = self.params.keys() if verbose else ["ecut", "ecutwfn", "ecutsigx", "ecuteps", "gwr_boxcutmin", "gwr_max_hwtene"]
             for k in keys:
                 app("%s: %s" % (k, self.params[k]))
+
+            app("Max_bstart: %d" % self.r.max_bstart)
+            app("min_bstop: %d" % self.r.min_bstop)
+            app("bstart_sk, bstop_sk")
+            for spin in range(self.nsppol):
+                for ikc, sigma_kpoint in enumerate(self.sigma_kpoints):
+                    app(f"{self.r.bstart_sk[spin, ikc]}, {self.r.bstop_sk[spin, ikc]}")
+
             if verbose:
                 app(marquee("k-points in Sigma_nk", mark="="))
                 app(self.r.sigma_kpoints.to_string(title=None, pre_string="\t"))
@@ -640,18 +660,28 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
             with_geo: True if geometry info should be included.
         """
         d = {}
-        d["kpoint"] = [k.frac_coords for k in self.sigma_kpoints] * self.nsppol
-        d["kname"] = [k.name for k in self.sigma_kpoints] * self.nsppol
-        d["ks_dirgaps"] = self.ks_dirgaps.ravel()
-        d["qpz0_dirgaps"] = self.qpz0_dirgaps.ravel()
-        #d["qp_pade_dirgaps"] = self.qp_pade_dirgaps.ravel()
-        d["spin"] = [0] * len(self.sigma_kpoints)
-        if self.nsppol == 2: d["spin"].extend([1] * len(self.sigma_kpoints))
+        d["kpoint"] = [k.frac_coords for k in self.sigma_kpoints] * self.nsppol * self.scf_iteration
+        d["kname"] = [k.name for k in self.sigma_kpoints] * self.nsppol * self.scf_iteration
+        if self.scf_iteration > 1:
+            d["iteration"] = []
+            d["ks_dirgaps"] = np.zeros(0)
+            d["qpz0_dirgaps"] = np.zeros(0)
+            # d["qp_pade_dirgaps"] = np.zeros(0)
+            for iter in range(self.scf_iteration):
+                d["iteration"].extend([iter + 1] * len(self.sigma_kpoints) * self.nsppol)
+                d["ks_dirgaps"] = np.concatenate((d["ks_dirgaps"], (self.r.read_value("ks_gaps", path=f"iter{iter+1}") * abu.Ha_eV).ravel()))
+                d["qpz0_dirgaps"] = np.concatenate((d["qpz0_dirgaps"], (self.r.read_value("qpz_gaps", path=f"iter{iter+1}") * abu.Ha_eV).ravel()))
+                # d["qp_pade_dirgaps"] = np.concatenate((d["qp_pade_dirgaps"], (self.r.read_value("qp_pade_gaps", path=f"iter{iter+1}") * abu.Ha_eV).ravel()))
+        else:
+            d["ks_dirgaps"] = self.ks_dirgaps.ravel()
+            d["qpz0_dirgaps"] = self.qpz0_dirgaps.ravel()
+            # d["qp_pade_dirgaps"] = self.qp_pade_dirgaps.ravel()
+        d["spin"] = [0] * len(self.sigma_kpoints) * self.scf_iteration
+        if self.nsppol == 2: d["spin"].extend([1] * len(self.sigma_kpoints) * self.scf_iteration)
 
         if with_params:
             for k, v in self.params.items():
-                d[k] = [v] * len(self.sigma_kpoints) * self.nsppol
-
+                d[k] = [v] * len(self.sigma_kpoints) * self.nsppol * self.scf_iteration
         if with_geo:
             d.update(**self.structure.get_dict4pandas(with_spglib=True))
 
@@ -750,6 +780,90 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
         #print(d)
         return d
 
+    @add_fig_kwargs
+    def plot_qpgaps_iterations(self,
+                               abs_conv: float = None,
+                               qp_kpoints: str = "all",
+                               qp_type: str = "qpz0_dirgaps",
+                               span_style: dict | None = None,
+                               fontsize: int = 8,
+                               **kwargs) -> Figure:
+        """
+        Plot the iterations of the direct QP gaps for all the k-points and spins.
+
+        Args:
+            abs_conv: absolute convergence threshold for the QP gaps.
+            qp_kpoints: List of k-points in self-energy. Accept integers (list or scalars), list of vectors,
+                or "all" to plot all k-points.
+            qp_type: "qpz0_dirgaps" for linear qp equation with Z factor computed at the KS e0,
+                     "qp_pade_dirgaps" for non-linear qp equation.
+            span_style: dictionary with options passed to ax.axhspan.
+            fontsize: legend and label fontsize.
+        """
+
+        assert self.scf_iteration > 1, "GWR calculation was not self-consistent!"
+
+        # Get labels from x and y and add units.
+        xlabel = "SCF Iteration"
+        ylabel = "QP Direct Gaps (eV)"
+
+        nsppol = self.nsppol
+        qpkinds = self.find_qpkinds(qp_kpoints)
+
+        # Build grid with (nkpt, nsppol) plots.
+        nrows, ncols = len(qpkinds), nsppol
+        ax_mat, fig, plt = get_axarray_fig_plt(None, nrows=nrows, ncols=ncols,
+                                               sharex=True, sharey=False, squeeze=False)
+
+        if qp_type in ("qpz0_dirgaps", "qp_pade_dirgaps"):
+            y = qp_type
+        else:
+            raise ValueError(f"Invalid {qp_type=}. Should be in ('qpz0_dirgaps', 'qp_pade_dirgaps')")
+
+        for spin in range(nsppol):
+            for ix, (sigma_kpt, ikcalc) in enumerate(qpkinds):
+                ax = ax_mat[ix, spin]
+                data = self.get_dirgaps_dataframe(kpoint=ikcalc,
+                                                  spin=spin,
+                                                  with_params=False,
+                                                  with_geo=False)
+                ks_row = data.iloc[0].copy()
+                ks_row[y] = ks_row["ks_dirgaps"]
+                ks_row["iteration"] = 0
+                data = pd.concat([pd.DataFrame([ks_row]), data], ignore_index=True).reset_index(drop=True)
+
+                plot_xy_with_hue(data,
+                                 x="iteration",
+                                 y=y,
+                                 hue=None,
+                                 abs_conv=abs_conv,
+                                 span_style=span_style,
+                                 ax=ax,
+                                 fontsize=fontsize,
+                                 step=True,
+                                 show=False,
+                                 )
+
+                if ix == len(qpkinds) - 1:
+                    ax.set_xlabel(xlabel)
+                else:
+                    set_visible(ax, False, "xlabel")
+
+                if ix == 0:
+                    ax.set_ylabel(ylabel)
+                else:
+                    set_visible(ax, False, "ylabel")
+
+                set_axlims(ax, (-0.2, self.scf_iteration+0.2), "x")
+                xticks = np.arange(0, self.scf_iteration + 1, 1)
+                ax.set_xticks(xticks)
+                ax.set_xticklabels([str(int(tick)) if tick else "KS" for tick in xticks])
+
+                ax.set_title("k-point: %s" % repr(sigma_kpt),
+                             fontsize=fontsize)
+
+        return fig
+    
     def interpolate(self,
                     lpratio: int = 5,
                     ks_ebands_kpath: ElectronBands | None = None,
@@ -759,6 +873,7 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
                     line_density: int = 20,
                     filter_params: list | None = None,
                     only_corrections: bool = False,
+                    iter: int = None,
                     verbose: int = 0):
         """
         Interpolate the QP corrections in k-space on a k-path and, optionally, on a k-mesh
@@ -806,7 +921,7 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
                     None if ``ks_ebands_kmesh`` is not passed.
                 * interpolator: |SkwInterpolator| object.
         """
-        # TODO: Consistency check.
+        # Consistency check.
         errlines = []
         eapp = errlines.append
         if len(self.sigma_kpoints) != len(self.ebands.kpoints):
@@ -826,7 +941,6 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
 
         if ks_ebands_kpath is None:
             # Generate k-points for interpolation. Will interpolate all bands available in the GWR file.
-            bstart, bstop = 0, -1
             if vertices_names is None:
                 vertices_names = [(k.frac_coords, k.name) for k in self.structure.hsym_kpoints]
             kpath = Kpath.from_vertices_and_names(self.structure, vertices_names, line_density=line_density)
@@ -838,71 +952,84 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
             kfrac_coords = [k.frac_coords for k in ks_ebands_kpath.kpoints]
             knames = [k.name for k in ks_ebands_kpath.kpoints]
 
-            # Find the band range for the interpolation.
-            bstart, bstop = 0, ks_ebands_kpath.nband
-            bstop = min(bstop, self.r.min_bstop)
+            #bstop = min(bstop, self.r.min_bstop)
             if ks_ebands_kpath.nband < self.r.min_bstop:
                 cprint("Number of bands in KS band structure smaller than the number of bands in GW corrections", "red")
                 cprint("Highest GW bands will be ignored", "red")
 
             if not ks_ebands_kpath.kpoints.is_path:
-                cprint("Energies in ks_ebands_kpath should be along a k-path!", "red")
+                raise ValueError("Energies in ks_ebands_kpath should be along a k-path!")
 
         # Interpolate QP energies if ks_ebands_kpath is None else interpolate QP corrections
         # and re-apply them on top of the KS band structure.
         gw_kcoords = [k.frac_coords for k in self.sigma_kpoints]
 
         # Read GW energies from file (real part) and compute corrections if ks_ebands_kpath.
-        # This is the section in which the fileoformat (SIGRES.nc, GWR.nc) enters into play...
+        # This is the section in which the fileformat (SIGRES.nc, GWR.nc) enters into play...
+        # On disk we have written the following arrays (Fortran notation):
 
         # nctkarr_t("ze0_kcalc", "dp", "two, smat_bsize1, nkcalc, nsppol"), &
         # nctkarr_t("qpz_ene", "dp", "two, smat_bsize1, nkcalc, nsppol"), &
         # nctkarr_t("qp_pade", "dp", "two, smat_bsize1, nkcalc, nsppol"), &
-
+        #
         # where
+        #
         #   smat_bsize1 = gwr%b2gw - gwr%b1gw + 1
         #   smat_bsize2 = merge(1, gwr%b2gw - gwr%b1gw + 1, gwr%sig_diago)
 
         # Read QP energies
         varname = "qpz_ene"
-        egw_rarr = self.r.read_value(varname, cmode="c").real * abu.Ha_eV
+        egw_rarr = self.r.read_value(varname, cmode="c", path=f"iter{iter}" if iter else '/').real * abu.Ha_eV
+
         if ks_ebands_kpath is not None:
+            # Compute QP corrections
             if ks_ebands_kpath.structure != self.structure:
                 cprint("sigres.structure and ks_ebands_kpath.structures differ. Check your files!", "red")
-            # Compute QP corrections
             egw_rarr -= (self.r.read_value("e0_kcalc") * abu.Ha_eV)
 
         # Note there's no guarantee that the sigma_kpoints and the corrections have the same k-point index.
         # Be careful because the order of the k-points and the band range stored in the SIGRES file may differ ...
-        qpdata = np.empty(egw_rarr.shape)
         kcalc2ibz = self.r.read_value("kcalc2ibz")
         kpt2ibz = kcalc2ibz[0,:] - 1
 
-        for ikcalc, gwk in enumerate(self.sigma_kpoints):
-            #ik_ibz = self.r.kpt2ibz(gwk)
-            ik_ibz = kpt2ibz[ikcalc]
-            #print(f"{ikcalc=}, {ik_ibz=}")
-            for spin in range(self.nsppol):
-                qpdata[spin, ik_ibz, :] = egw_rarr[spin, ik_ibz, :]
+        # This is the tricky part when not all the bands have been corrected with GW.
+        # In this case, we have to select a subset of bands and transfer the data
+        # from gwr_rarr to qpdata.
+        nb = self.r.min_bstop - self.r.max_bstart
+        qpdata = np.empty((self.nsppol, self.nkcalc, nb))
+
+        for spin in range(self.nsppol):
+            for ikcalc, gwk in enumerate(self.sigma_kpoints):
+                ik_ibz = kpt2ibz[ikcalc]
+                #assert ik_ibz == ikcalc
+                for ib_egw in range(egw_rarr.shape[2]):
+                    ib_glob = ib_egw + self.r.min_bstart
+                    #print(self.r.min_bstop > ib_glob >= self.r.bstart_sk[spin, ikcalc])
+                    if self.r.min_bstop > ib_glob >= self.r.max_bstart:
+                        ib = ib_glob - self.r.max_bstart
+                        qpdata[spin, ik_ibz, ib] = egw_rarr[spin, ik_ibz, ib_egw]
+                #print(f"{gwk=}\n", qpdata[spin, ik_ibz])
 
         # Build interpolator for QP corrections.
         from abipy.core.skw import SkwInterpolator
         cell = (self.structure.lattice.matrix, self.structure.frac_coords, self.structure.atomic_numbers)
-        qpdata = qpdata[:, :, bstart:bstop]
         has_timrev = has_timrev_from_kptopt(self.r.read_value("kptopt"))
 
         skw = SkwInterpolator(lpratio, gw_kcoords, qpdata, self.ebands.fermie, self.ebands.nelect,
-                              cell, fm_symrel, has_timrev,
-                              filter_params=filter_params, verbose=verbose)
+                              cell, fm_symrel, has_timrev, filter_params=filter_params, verbose=verbose)
 
         if ks_ebands_kpath is None:
             # Interpolate QP energies.
             eigens_kpath = skw.interp_kpts(kfrac_coords).eigens
         else:
             # Interpolate QP energies corrections and add them to KS.
-            ref_eigens = ks_ebands_kpath.eigens[:, :, bstart:bstop]
+            ks_bstart, ks_bstop = self.r.max_bstart, min(ks_ebands_kpath.nband, self.r.min_bstop)
+            ref_eigens = ks_ebands_kpath.eigens[:, :, ks_bstart:ks_bstop]
             qp_corrs = skw.interp_kpts_and_enforce_degs(kfrac_coords, ref_eigens, atol=ks_degatol).eigens
-            eigens_kpath = qp_corrs if only_corrections else ref_eigens + qp_corrs
+            e_kpath_bslice = qp_corrs if only_corrections else ref_eigens + qp_corrs
+
+            eigens_kpath = ks_ebands_kpath.eigens.copy()
+            eigens_kpath[:, :, ks_bstart:ks_bstop] = e_kpath_bslice
 
         # Build new ebands object with k-path.
         kpts_kpath = Kpath(self.structure.reciprocal_lattice, kfrac_coords, weights=None, names=knames)
@@ -912,8 +1039,9 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
         # because one should first interpolate the QP bands on a mesh. Here I align the QP bands
         # at the HOMO of the KS bands.
         homos = ks_ebands_kpath.homos if ks_ebands_kpath is not None else self.ebands.homos
-        qp_fermie = max([eigens_kpath[e.spin, e.kidx, e.band] for e in homos])
-        #qp_fermie = self.ebands.fermie; qp_fermie = 0.0
+        qp_fermie = self.ebands.fermie
+        if self.r.min_bstart == 0:
+            qp_fermie = max([eigens_kpath[e.spin, e.kidx, e.band] for e in homos])
 
         qp_ebands_kpath = ElectronBands(self.structure, kpts_kpath, eigens_kpath, qp_fermie, occfacts_kpath,
                                         self.ebands.nelect, self.ebands.nspinor, self.ebands.nspden,
@@ -923,11 +1051,11 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
         if ks_ebands_kmesh is not None:
             # Interpolate QP corrections on the same k-mesh as the one used in the KS run.
             ks_ebands_kmesh = ElectronBands.as_ebands(ks_ebands_kmesh)
-            if bstop > ks_ebands_kmesh.nband:
-                raise ValueError("Not enough bands in ks_ebands_kmesh, found %s, minimum expected %d\n" % (
-                    ks_ebands_kmesh.nband, bstop))
+            #if bstop > ks_ebands_kmesh.nband:
+            #    raise ValueError("Not enough bands in ks_ebands_kmesh, found %s, minimum expected %d\n" % (
+            #        ks_ebands_kmesh.nband, bstop))
             if ks_ebands_kpath.structure != self.structure:
-                cprint("sigres.structure and ks_ebands_kpath.structures differ. Check your files!", "red")
+                cprint("gwr.structure and ks_ebands_kpath.structure differ. Check your files!", "red")
             if not ks_ebands_kmesh.kpoints.is_ibz:
                 cprint("Energies in ks_ebands_kmesh should be given in the IBZ", "red")
 
@@ -935,8 +1063,9 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
             dos_kcoords = [k.frac_coords for k in ks_ebands_kmesh.kpoints]
             dos_weights = [k.weight for k in ks_ebands_kmesh.kpoints]
 
-            # Interpolate QP corrections from bstart to bstop.
-            ref_eigens = ks_ebands_kmesh.eigens[:, :, bstart:bstop]
+            # Interpolate QP corrections from ks_bstart to ks_bstop.
+            ks_bstart, ks_bstop = self.r.max_bstart, min(ks_ebands_kpath.nband, self.r.min_bstop)
+            ref_eigens = ks_ebands_kmesh.eigens[:, :, ks_bstart:ks_bstop]
             qp_corrs = skw.interp_kpts_and_enforce_degs(dos_kcoords, ref_eigens, atol=ks_degatol).eigens
             eigens_kmesh = qp_corrs if only_corrections else ref_eigens + qp_corrs
 
@@ -1241,7 +1370,7 @@ class GwrFile(AbinitNcFile, Has_Structure, Has_ElectronBands, NotebookWriter):
 
     def write_notebook(self, nbpath=None, title=None) -> str:
         """
-        Write a jupyter_ notebook to ``nbpath``. If nbpath is None, a temporay file in the current
+        Write a jupyter_ notebook to ``nbpath``. If nbpath is None, a temporary file in the current
         working directory is created. Return path to the notebook.
         """
         nbformat, nbv, nb = self.get_nbformat_nbv_nb(title=title)
@@ -1293,6 +1422,7 @@ class GwrReader(ETSF_Reader):
         self.bstop_sk = self.read_value("bstop_ks")
         # min band index for GW corrections over spins and k-points
         self.min_bstart = np.min(self.bstart_sk)
+        self.max_bstart = np.max(self.bstart_sk)
         self.min_bstop = np.min(self.bstop_sk)
 
     @cached_property
@@ -1420,7 +1550,7 @@ class GwrReader(ETSF_Reader):
 
         return tuple(qps_spin)
 
-    def read_qplist_sk(self, spin: int, kpoint: KptSelect, band: int = None, ignore_imag: bool = False) -> QPList:
+    def read_qplist_sk(self, spin: int, kpoint: KptSelect, band: int = None, ignore_imag: bool = False, iter: int = None) -> QPList:
         """
         Read and return a QPList object for the given spin, kpoint.
 
@@ -1444,10 +1574,10 @@ class GwrReader(ETSF_Reader):
             if band is not None and sigma_band != band: continue
             ib = sigma_band - self.min_bstart
 
-            qpe = self.read_variable("qpz_ene")[spin, ikcalc, ib] * abu.Ha_meV
+            qpe = self.read_variable("qpz_ene", path=f"iter{iter}" if iter else '/')[spin, ikcalc, ib] * abu.Ha_meV
             qpe = qpe[0] + 1j*qpe[1]
 
-            ze0 = self.read_variable("ze0_kcalc")[spin, ikcalc, ib]
+            ze0 = self.read_variable("ze0_kcalc", path=f"iter{iter}" if iter else '/')[spin, ikcalc, ib]
             ze0 = ze0[0] + 1j*ze0[1]
 
             # TODO Finalize the implementation
@@ -1469,6 +1599,9 @@ class GwrReader(ETSF_Reader):
 
         return qp_list
 
+    @cached_property
+    def path2group(self) -> dict:
+        return self.rootgrp.groups
 
 class GwrRobot(Robot, RobotWithEbands):
     """
@@ -2038,7 +2171,7 @@ class GwrRobot(Robot, RobotWithEbands):
 
     def write_notebook(self, nbpath=None, title=None) -> str:
         """
-        Write a jupyter_ notebook to ``nbpath``. If nbpath is None, a temporay file in the current
+        Write a jupyter_ notebook to ``nbpath``. If nbpath is None, a temporary file in the current
         working directory is created. Return path to the notebook.
         """
         nbformat, nbv, nb = self.get_nbformat_nbv_nb(title=title)

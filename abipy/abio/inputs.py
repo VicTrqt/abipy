@@ -435,10 +435,19 @@ class AbinitInput(AbiAbstractInput, MSONable, Has_Structure):
                 raise self.Error(f"Directory `{pseudo_dir}` does not exist")
             pseudos = [os.path.join(pseudo_dir, p) for p in list_strings(pseudos)]
 
-        try:
-            self._pseudos = PseudoTable.as_table(pseudos).get_pseudos_for_structure(self.structure)
-        except ValueError as exc:
-            raise self.Error(str(exc))
+        if enforce_znucl is not None:
+            psps = []
+            for p in pseudos:
+                if isinstance(p, Pseudo):
+                    psps.append(p)
+                else:
+                    psps.append(Pseudo.from_file(p))
+            self._pseudos = psps
+        else:
+            try:
+                self._pseudos = PseudoTable.as_table(pseudos).get_pseudos_for_structure(self.structure)
+            except ValueError as exc:
+                raise self.Error(str(exc))
 
         if comment is not None: self.set_comment(comment)
 
@@ -490,9 +499,9 @@ class AbinitInput(AbiAbstractInput, MSONable, Has_Structure):
         if len(typat) != len(self.structure):
             raise ValueError("typat contains %d entries while it should be natom: %d" % (len(typat), len(self.structure)))
 
-        ntypat = self.structure.n_elems
-        if len(znucl) != ntypat:
-            raise ValueError("znucl contains %d entries while it should be ntypat: %d" % (len(znucl), ntypat))
+        #ntypat = self.structure.n_elems
+        #if len(znucl) != ntypat:
+        #    raise ValueError("znucl contains %d entries while it should be ntypat: %d" % (len(znucl), ntypat))
 
     def variable_checksum(self) -> str:
         """
@@ -2319,6 +2328,55 @@ with the Abinit version you are using? Please contact the AbiPy developers.""" %
         inp.pop_tolerances()
 
         return inp
+
+
+    def make_phpert_input(self, perturbation, tolerance=None, prtwf=-1, manager=None) -> AbinitInput:
+        """
+        Return |AbinitInput| for a Phonon calculation for a given perturbation.
+        This functions should be called with an input that represents a GS run.
+
+        Args:
+            perturbation: dict with the Abinit variables defining the irreducible perturbation.
+                Example: {'idir': 1, 'ipert': 4, 'qpt': [0.0, 0.0, 0.0]}.
+            tolerance: Dict with a single ABINIT tolerance variable (e.g. ``{'tolvrs': 1.0e-10}``)
+                used to control the convergence of the DFPT calculation. If ``None``, a
+                default of ``{'tolvrs': 1.0e-10}`` is used.
+            prtwf: Value passed to the ABINIT variable ``prtwf`` to control the printing
+                of wavefunctions for the phonon calculation. Defaults to ``-1`` (ABINIT default).
+            manager: |TaskManager| of the task. If None, the manager is initialized from
+                the config file.
+        """
+        if tolerance is None: tolerance = {"tolvrs": 1.0e-10}
+
+        if len(tolerance) != 1 or any(k not in _TOLVARS for k in tolerance):
+            raise self.Error(f"Invalid {tolerance=}")
+        inp = self.deepcopy()
+        inp.pop_irdvars()
+
+        scf_kptopt = self.get("kptopt", 1)
+        kptopt = 3
+        if np.allclose(perturbation["qpt"], 0) and scf_kptopt in (1, 2):
+            kptopt = 2
+
+        rfdir = 3 * [0]
+        rfdir[perturbation["idir"] - 1] = 1
+
+        inp.set_vars(
+            rfphon=1,                           # Will consider phonon-type perturbation
+            nqpt=1,                             # One wavevector is to be considered
+            qpt=perturbation["qpt"],                       # q-wavevector.
+            rfatpol=[perturbation["ipert"], perturbation["ipert"]],
+            rfdir=rfdir,
+            kptopt=kptopt,
+            comment="Input file for PH calculation with DFPT.",
+            prtwf=prtwf,
+        )
+
+        inp.pop_tolerances()
+        inp.set_vars(tolerance)
+
+        return inp
+
 
     def make_dte_inputs(self, phonon_pert=False, skip_permutations=False, ixc=None, manager=None) -> MultiDataset:
         """
