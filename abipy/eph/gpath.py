@@ -2,26 +2,30 @@
 This module contains objects for analyzing the GPATH.nc file storing
 the e-ph matrix elements along a k/q path
 """
+
 from __future__ import annotations
 
-import numpy as np
-import abipy.core.abinit_units as abu
-
+import warnings
 from functools import cached_property
+
+import numpy as np
 from monty.string import marquee
-#from monty.termcolor import cprint
-from abipy.core.structure import Structure
+
+import abipy.core.abinit_units as abu
+from abipy.abio.robots import Robot
 from abipy.core.kpoints import Kpath
 from abipy.core.mixins import AbinitNcFile, Has_Structure, NotebookWriter
-from abipy.tools.typing import PathLike
-#from abipy.tools.numtools import nparr_to_df
-from abipy.tools.plotting import (add_fig_kwargs, get_axarray_fig_plt, set_axlims, Marker, set_grid_legend)
-from abipy.electrons.ebands import ElectronBands, RobotWithEbands
+
+# from monty.termcolor import cprint
+from abipy.core.structure import Structure
 from abipy.dfpt.phonons import PhononBands
 from abipy.dfpt.phtk import NonAnalyticalPh
-from abipy.tools.typing import Figure
-from abipy.abio.robots import Robot
+from abipy.electrons.ebands import ElectronBands, RobotWithEbands
 from abipy.eph.common import BaseEphReader
+
+# from abipy.tools.numtools import nparr_to_df
+from abipy.tools.plotting import Marker, add_fig_kwargs, get_axarray_fig_plt, set_axlims, set_grid_legend
+from abipy.tools.typing import Figure, PathLike
 
 
 def k2s(k_vector, fmt=".3f", threshold=1e-8) -> str:
@@ -55,6 +59,10 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
         return cls(filepath)
 
     def __init__(self, filepath: PathLike):
+        """
+        Args:
+            filepath: Path to the netcdf file.
+        """
         super().__init__(filepath)
         self.r = GpathReader(filepath)
 
@@ -84,13 +92,13 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
 
     @cached_property
     def params(self) -> dict:
-        """dict with the convergence parameters, e.g. ``nbsum``."""
-        #od = OrderedDict([
+        """Dict with the convergence parameters, e.g. ``nbsum``."""
+        # od = OrderedDict([
         #    ("nbsum", self.nbsum),
         #    ("nqibz", self.r.nqibz),
-        #])
+        # ])
         ## Add EPH parameters.
-        #od.update(self.r.common_eph_params)
+        # od.update(self.r.common_eph_params)
 
         od = {}
         return od
@@ -100,7 +108,8 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
 
     def to_string(self, verbose: int = 0) -> str:
         """String representation with verbosiy level ``verbose``."""
-        lines = []; app = lines.append
+        lines = []
+        app = lines.append
 
         app(marquee("File Info", mark="="))
         app(self.filestat(as_string=True))
@@ -129,25 +138,57 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
     def _get_band_range(self, band_range):
         return (self.r.bstart, self.r.bstop) if band_range is None else band_range
 
+    def _get_wannier_comparison_band_range(self, band_range):
+        """Select the contiguous ab-initio band range used for a Wannier comparison."""
+        if not self.r.has_wannier:
+            raise ValueError("Wannier-interpolated matrix elements are not available in this GPATH.nc file")
+
+        if band_range is not None:
+            if band_range[1] - band_range[0] != self.r.nwan:
+                warnings.warn(
+                    "The ab-initio and Wannier averages use different numbers of bands; "
+                    "their normalizations and electronic subspaces differ.",
+                    stacklevel=3,
+                )
+            return band_range
+
+        if self.r.nwan > self.r.nb_in_g:
+            raise ValueError(f"Cannot select {self.r.nwan=} bands from {self.r.nb_in_g=}")
+
+        band_range = (int(self.r.bstart), int(self.r.bstart + self.r.nwan))
+        if self.r.nwan != self.r.nb_in_g:
+            warnings.warn(
+                f"Using contiguous ab-initio bands {band_range} to match {self.r.nwan=}. "
+                "With disentanglement this is only a diagnostic proxy for the true Wannier subspace; "
+                "a rigorous comparison requires projecting g with the ABIWAN transformation matrices.",
+                stacklevel=3,
+            )
+
+        return band_range
+
     @add_fig_kwargs
-    def plot_g_qpath(self,
-                     band_range=None,
-                     which_g="avg",
-                     with_qexp: int = 0,
-                     scale=1,
-                     gmax_mev=None,
-                     ph_modes=None,
-                     with_phbands=True,
-                     with_ebands=False,
-                     ax_mat=None,
-                     fontsize=8,
-                     **kwargs) -> Figure:
+    def plot_g_qpath(
+        self,
+        band_range=None,
+        which_g="avg",
+        with_qexp: int = 0,
+        scale=1,
+        gmax_mev=None,
+        ph_modes=None,
+        with_phbands=True,
+        with_ebands=False,
+        with_wannier=False,
+        ax_mat=None,
+        fontsize=8,
+        **kwargs,
+    ) -> Figure:
         """
         Plot the averaged ``|g(k,q)|`` in meV units along the q-path.
 
         Args:
             band_range: Band range that will be averaged over (python convention).
-                If None all bands are considered.
+                If None, all ab-initio bands are considered unless ``with_wannier``
+                is enabled, in which case a contiguous ``nwan``-band range is used.
             which_g: "avg" to plot the symmetrized ``|g|``, "raw" for unsymmetrized ``|g|``. "all" for both.
             with_qexp: Multiply ``|g(k, q)|`` by ``|q|^{with_qexp}``.
             scale: Scaling factor for the marker size used when with_phbands is True.
@@ -155,30 +196,48 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
             ph_modes: List of ph branch indices to show (start from 0). If None all modes are shown.
             with_phbands: False if phonon bands should now be displayed.
             with_ebands: False if electron bands should now be displayed.
+            with_wannier: Overlay Wannier-interpolated results when available. The
+                Wannier average uses all ``nwan`` bands and its interpolated
+                eigenvalues to identify electronic degeneracies. If ``band_range``
+                is None, the ab-initio average uses the contiguous range
+                ``[bstart, bstart + nwan)``. With disentanglement this range is only
+                a diagnostic proxy for the true Wannier subspace.
             ax_mat: List of |matplotlib-Axes| or None if a new figure should be created.
             fontsize: fontsize for legends and titles
         """
         which_g_list = self._get_which_g_list(which_g)
         nrows, ncols = len(which_g_list) + int((np.array([with_ebands, with_phbands]) == True).sum()), self.r.nsppol
 
-        ax_mat, fig, plt = get_axarray_fig_plt(ax_mat, nrows=nrows, ncols=ncols,
-                                               sharex=False, sharey=False, squeeze=False)
+        ax_mat, fig, plt = get_axarray_fig_plt(
+            ax_mat, nrows=nrows, ncols=ncols, sharex=False, sharey=False, squeeze=False
+        )
         marker_color = "gold"
-        band_range = self._get_band_range(band_range)
+        band_range = (
+            self._get_wannier_comparison_band_range(band_range)
+            if with_wannier
+            else self._get_band_range(band_range)
+        )
 
-        facts_q = np.ones(len(self.phbands.qpoints)) if with_qexp == 0 else \
-                  np.array([qpt.norm for qpt in self.phbands.qpoints]) ** with_qexp
+        facts_q = (
+            np.ones(len(self.phbands.qpoints))
+            if with_qexp == 0
+            else np.array([qpt.norm for qpt in self.phbands.qpoints]) ** with_qexp
+        )
 
         q_label = r"$|q|^{%d}$" % with_qexp if with_qexp else ""
         g_units = "(meV)" if with_qexp == 0 else r"(meV $\AA^-{%s}$)" % with_qexp
 
         for spin in range(self.r.nsppol):
             g_nuq_avg, g_nuq_raw = self.r.get_gnuq_average_spin(spin, band_range)
+            if with_wannier:
+                g_nuq_avg_wan, g_nuq_raw_wan = self.r.get_gnuq_average_spin(spin, None, which="wannier")
             ax_cnt = -1
 
             for which_g in which_g_list:
                 # Select ys according to which_g and multiply by facts_q
-                g_nuq = dict(avg=g_nuq_avg, raw=g_nuq_raw)[which_g] * facts_q[None,:]
+                g_nuq = dict(avg=g_nuq_avg, raw=g_nuq_raw)[which_g] * facts_q[None, :]
+                if with_wannier:
+                    g_nuq_wan = dict(avg=g_nuq_avg_wan, raw=g_nuq_raw_wan)[which_g] * facts_q[None, :]
 
                 # Plot g_nu(q)
                 ax_cnt += 1
@@ -187,8 +246,17 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
                     ax.set_title(f"Spin: {spin}")
 
                 for nu in range(self.r.natom3):
-                    if ph_modes is not None and nu not in ph_modes: continue
-                    ax.plot(g_nuq[nu], label=f"{nu=}")
+                    if ph_modes is not None and nu not in ph_modes:
+                        continue
+                    label = f"{nu=} ab-initio" if with_wannier else f"{nu=}"
+                    line, = ax.plot(g_nuq[nu], linestyle="-", label=label)
+                    if with_wannier:
+                        ax.plot(
+                            g_nuq_wan[nu],
+                            color=line.get_color(),
+                            linestyle="--",
+                            label=f"{nu=} Wannier",
+                        )
                     self.phbands.decorate_ax(ax, units="meV")
                     g_label = r"$|g^{\text{%s}}_{\mathbf{q}}|$ %s" % (which_g, q_label)
                     set_grid_legend(ax, fontsize, ylabel="%s %s" % (g_label, g_units))
@@ -201,18 +269,23 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
                 ax_cnt += 1
                 x, y, s = [], [], []
                 for iq, qpoint in enumerate(self.phbands.qpoints):
-                    omegas_nu = self.phbands.phfreqs[iq,:]
-                    for w, g2 in zip(omegas_nu, g_nuq_avg[:,iq], strict=True):
-                        x.append(iq); y.append(w); s.append(scale * g2)
+                    omegas_nu = self.phbands.phfreqs[iq, :]
+                    for w, g2 in zip(omegas_nu, g_nuq_avg[:, iq], strict=True):
+                        x.append(iq)
+                        y.append(w)
+                        s.append(scale * g2)
 
-                label = r'$|g^{\text{avg}}_{\mathbf{q}}|$' if with_qexp == 0 else \
-                        r'$|g^{\text{avg}}_{\mathbf{q}}| |q|^{%s}$' % with_qexp
+                label = (
+                    r"$|g^{\text{avg}}_{\mathbf{q}}|$"
+                    if with_qexp == 0
+                    else r"$|g^{\text{avg}}_{\mathbf{q}}| |q|^{%s}$" % with_qexp
+                )
 
                 ax = ax_mat[ax_cnt, spin]
 
-                points = Marker(x, y, s, color=marker_color, edgecolors='gray', alpha=0.8, label=label)
+                points = Marker(x, y, s, color=marker_color, edgecolors="gray", alpha=0.8, label=label)
                 self.phbands.plot(ax=ax, points=points, show=False)
-                set_grid_legend(ax, fontsize) #, xlabel=r"Wavevector $\mathbf{q}$")
+                set_grid_legend(ax, fontsize)  # , xlabel=r"Wavevector $\mathbf{q}$")
                 ax.set_title("Phonons", fontsize=fontsize)
 
             if with_ebands:
@@ -231,16 +304,19 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
         return fig
 
     @add_fig_kwargs
-    def plot_g_kpath(self,
-                     band_range=None,
-                     which_g="avg",
-                     gmax_mev=None,
-                     scale=1,
-                     ph_modes=None,
-                     with_ebands=True,
-                     ax_mat=None,
-                     fontsize=8,
-                     **kwargs) -> Figure:
+    def plot_g_kpath(
+        self,
+        band_range=None,
+        which_g="avg",
+        gmax_mev=None,
+        scale=1,
+        ph_modes=None,
+        with_ebands=True,
+        with_wannier=False,
+        ax_mat=None,
+        fontsize=8,
+        **kwargs,
+    ) -> Figure:
         """
         Plot the averaged ``|g(k,q)|`` in meV units along the k-path.
 
@@ -251,31 +327,55 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
             scale: Scaling factor for the marker size used when with_phbands is True.
             ph_modes: List of ph branch indices to show (start from 0). If None all modes are show.
             with_ebands: False if electron bands should now be displayed.
+            with_wannier: Overlay Wannier-interpolated results when available. The
+                Wannier average uses all ``nwan`` bands and its interpolated
+                eigenvalues to identify electronic degeneracies. If ``band_range``
+                is None, the ab-initio average uses the contiguous range
+                ``[bstart, bstart + nwan)``. With disentanglement this range is only
+                a diagnostic proxy for the true Wannier subspace.
             ax_mat: List of |matplotlib-Axes| or None if a new figure should be created.
             fontsize: fontsize for legends and titles
         """
         which_g_list = self._get_which_g_list(which_g)
         nrows, ncols = len(which_g_list) + int((np.array([with_ebands]) == True).sum()), self.r.nsppol
 
-        ax_mat, fig, plt = get_axarray_fig_plt(ax_mat, nrows=nrows, ncols=ncols,
-                                               sharex=False, sharey=False, squeeze=False)
+        ax_mat, fig, plt = get_axarray_fig_plt(
+            ax_mat, nrows=nrows, ncols=ncols, sharex=False, sharey=False, squeeze=False
+        )
         marker_color = "gold"
-        band_range = self._get_band_range(band_range)
+        band_range = (
+            self._get_wannier_comparison_band_range(band_range)
+            if with_wannier
+            else self._get_band_range(band_range)
+        )
 
         for spin in range(self.r.nsppol):
             g_nuk_avg, g_nuk_raw = self.r.get_gnuk_average_spin(spin, band_range)
+            if with_wannier:
+                g_nuk_avg_wan, g_nuk_raw_wan = self.r.get_gnuk_average_spin(spin, None, which="wannier")
             ax_cnt = -1
 
             for which_g in which_g_list:
                 # Select ys according to which_g
                 g_nuk = dict(avg=g_nuk_avg, raw=g_nuk_raw)[which_g]
+                if with_wannier:
+                    g_nuk_wan = dict(avg=g_nuk_avg_wan, raw=g_nuk_raw_wan)[which_g]
 
                 # Plot g_nu(q)
                 ax_cnt += 1
                 ax = ax_mat[ax_cnt, spin]
                 for nu in range(self.r.natom3):
-                    if ph_modes is not None and nu not in ph_modes: continue
-                    ax.plot(g_nuk[nu], label=f"{which_g} {nu=}")
+                    if ph_modes is not None and nu not in ph_modes:
+                        continue
+                    label = f"{which_g} {nu=} ab-initio" if with_wannier else f"{which_g} {nu=}"
+                    line, = ax.plot(g_nuk[nu], linestyle="-", label=label)
+                    if with_wannier:
+                        ax.plot(
+                            g_nuk_wan[nu],
+                            color=line.get_color(),
+                            linestyle="--",
+                            label=f"{which_g} {nu=} Wannier",
+                        )
 
                 self.ebands_k.decorate_ax(ax, units="meV")
                 set_grid_legend(ax, fontsize, ylabel=r"$|g^{\text{%s}}_{\mathbf{k}}|$ (meV)" % (which_g))
@@ -287,7 +387,7 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
                 ax_cnt += 1
                 ax = ax_mat[ax_cnt, spin]
                 self.ebands_k.plot(ax=ax, spin=spin, band_range=band_range, with_gaps=False, show=False)
-                set_grid_legend(ax, fontsize) #, xlabel=r"Wavevector $\mathbf{q}$")
+                set_grid_legend(ax, fontsize)  # , xlabel=r"Wavevector $\mathbf{q}$")
 
         if (qpt_name := self.structure.findname_in_hsym_stars(self.r.eph_fix_wavec)) is None:
             qpt_name = k2s(self.r.eph_fix_wavec)
@@ -302,10 +402,10 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
         """
         if self.r.eph_fix_korq == "k":
             plt_kwargs = dict(with_phbands=True, with_ebands=True, show=False)
-            #yield self.plot_g_qpath(with_qexp=1, **plt_kwargs)
+            # yield self.plot_g_qpath(with_qexp=1, **plt_kwargs)
             yield self.plot_g_qpath(with_qexp=0, **plt_kwargs)
-            #yield self.ebands_kq.plot(show=False)
-            #yield self.phbands.plot(show=False)
+            # yield self.ebands_kq.plot(show=False)
+            # yield self.phbands.plot(show=False)
 
         if self.r.eph_fix_korq == "q":
             plt_kwargs = dict(with_ebands=True, show=False)
@@ -318,12 +418,14 @@ class GpathFile(AbinitNcFile, Has_Structure, NotebookWriter):
         """
         nbformat, nbv, nb = self.get_nbformat_nbv_nb(title=None)
 
-        nb.cells.extend([
-            nbv.new_code_cell("gpath = abilab.abiopen('%s')" % self.filepath),
-            nbv.new_code_cell("print(gpath)"),
-            nbv.new_code_cell("gpath.ebands.plot();"),
-            nbv.new_code_cell("gpath.phbands.plot();"),
-        ])
+        nb.cells.extend(
+            [
+                nbv.new_code_cell("gpath = abilab.abiopen('%s')" % self.filepath),
+                nbv.new_code_cell("print(gpath)"),
+                nbv.new_code_cell("gpath.ebands.plot();"),
+                nbv.new_code_cell("gpath.phbands.plot();"),
+            ]
+        )
 
         return self._write_nb_nbpath(nb, nbpath)
 
@@ -335,7 +437,12 @@ class GpathReader(BaseEphReader):
     .. rubric:: Inheritance Diagram
     .. inheritance-diagram:: GpathReader
     """
+
     def __init__(self, filepath: PathLike):
+        """
+        Args:
+            filepath: Path to the netcdf file.
+        """
         super().__init__(filepath)
 
         # Read important dimensions.
@@ -352,6 +459,20 @@ class GpathReader(BaseEphReader):
         self.all_eigens_k = self.read_value("all_eigens_k")
         self.all_eigens_kq = self.read_value("all_eigens_kq")
 
+        # These variables are written only when ABINIT interpolates g(k, q) from
+        # GWAN.nc.  Keep the Wannier eigenvalues separate from the ab-initio ones:
+        # they belong to the interpolated Hamiltonian and use Wannier band indices
+        # 0:nwan, without the ab-initio bstart offset.
+        self.has_wannier = "gkq2_nu_wan" in self.rootgrp.variables
+        if self.has_wannier:
+            self.nwan = self.read_dimvalue("nwan")
+            self.all_eigens_wan_k = self.read_value("all_eigens_wan_k")
+            self.all_eigens_wan_kq = self.read_value("all_eigens_wan_kq")
+        else:
+            self.nwan = 0
+            self.all_eigens_wan_k = None
+            self.all_eigens_wan_kq = None
+
         # Read important variables.
         self.eph_fix_korq = self.read_string("eph_fix_korq")
         if self.eph_fix_korq not in {"k", "q"}:
@@ -359,14 +480,26 @@ class GpathReader(BaseEphReader):
 
         self.eph_fix_wavec = self.read_value("eph_fix_wavevec")
         self.dvdb_add_lr = self.read_value("dvdb_add_lr")
-        #self.used_ftinterp = self.read_value("used_ftinterp")
-        #self.completed = self.read_value("gstore_completed")
+        # self.used_ftinterp = self.read_value("used_ftinterp")
+        # self.completed = self.read_value("gstore_completed")
 
         # Note conversion Fortran --> C for the bstart index.
         nband = self.read_dimvalue("nband")
         self.bstart = self.read_value("bstart") - 1
         self.bstop = self.read_value("bstop")
         self.band_range = [self.bstart, self.bstop]
+
+    def _get_gdata(self, which: str):
+        """Return the dimensions and eigenvalues associated with an e-ph dataset."""
+        if which == "abinitio":
+            return self.nb_in_g, self.bstart, self.all_eigens_k, self.all_eigens_kq, "gkq2_nu"
+
+        if which == "wannier":
+            if not self.has_wannier:
+                raise ValueError("Wannier-interpolated matrix elements are not available in this GPATH.nc file")
+            return self.nwan, 0, self.all_eigens_wan_k, self.all_eigens_wan_kq, "gkq2_nu_wan"
+
+        raise ValueError(f"Invalid {which=}; expected 'abinitio' or 'wannier'")
 
     def read_ebands_which_fixed(self, which_fixed: str):
         """
@@ -395,8 +528,8 @@ class GpathReader(BaseEphReader):
         occfacts = np.zeros_like(all_eigens)
         path = Kpath(structure.lattice.reciprocal_lattice, frac_coords)
 
-        #print(f"Before ElectronBands {len(path)=}, {all_eigens.shape=}")
-        #print(path)
+        # print(f"Before ElectronBands {len(path)=}, {all_eigens.shape=}")
+        # print(path)
 
         return ElectronBands(structure, path, all_eigens, fermie, occfacts, nelect, nspinor, nspden)
 
@@ -406,7 +539,7 @@ class GpathReader(BaseEphReader):
         """
         amu_list = self.read_value("atomic_mass_units")
         atomic_numbers = self.read_value("atomic_numbers")
-        amu = {at: a for at, a in zip(atomic_numbers, amu_list)}
+        amu = {at: a for at, a in zip(atomic_numbers, amu_list, strict=False)}
 
         # phfreqs are in eV for historical reason
         phfreqs = self.read_value("phfreqs")
@@ -416,21 +549,33 @@ class GpathReader(BaseEphReader):
         structure = self.read_structure()
         qpath_frac_coords = self.read_value("qpoints")
 
-        path_qq = Kpath(structure.lattice.reciprocal_lattice, qpath_frac_coords, weights=None, names=None, ksampling=None)
+        path_qq = Kpath(
+            structure.lattice.reciprocal_lattice, qpath_frac_coords, weights=None, names=None, ksampling=None
+        )
 
-        non_anal_ph = NonAnalyticalPh.from_ncreader(self) if "non_analytical_directions" in self.rootgrp.variables else None
+        non_anal_ph = (
+            NonAnalyticalPh.from_ncreader(self) if "non_analytical_directions" in self.rootgrp.variables else None
+        )
 
-        return PhononBands(structure=structure, qpoints=path_qq, phfreqs=phfreqs, phdispl_cart=phdispl_cart, amu=amu,
-                           non_anal_ph=non_anal_ph,
-                           # TODO ?
-                           #epsinf=epsinf,
-                           #zcart=zcart,
-                           )
+        return PhononBands(
+            structure=structure,
+            qpoints=path_qq,
+            phfreqs=phfreqs,
+            phdispl_cart=phdispl_cart,
+            amu=amu,
+            non_anal_ph=non_anal_ph,
+            # TODO ?
+            # epsinf=epsinf,
+            # zcart=zcart,
+        )
 
-    def get_gnuq_average_spin(self,
-                              spin: int,
-                              band_range: list | tuple | None,
-                              eps_mev: float = 0.01) -> tuple:
+    def get_gnuq_average_spin(
+        self,
+        spin: int,
+        band_range: list | tuple | None,
+        eps_mev: float = 0.01,
+        which: str = "abinitio",
+    ) -> tuple:
         """
         Average e-matrix elements over phonon modes, and k- k+q electrons when the matrix elements
         have been computed along a q-path.
@@ -439,6 +584,9 @@ class GpathReader(BaseEphReader):
             spin: spin index
             band_range: Band range that will be averaged over (python convention).
             eps_mev: Tolerance in meV used to detect degeneracies for phonons and electrons.
+            which: Select the ``"abinitio"`` or ``"wannier"`` matrix elements.
+                Wannier bands use indices in ``[0, nwan)`` and their own interpolated
+                eigenvalues when constructing the degeneracy masks.
 
         Return:
             tuple with two numpy array
@@ -452,14 +600,12 @@ class GpathReader(BaseEphReader):
         eps_ev = eps_ha * abu.Ha_eV
 
         # Number of m, n bands in g_mn, the first band starts at bstart.
-        nb_in_g = self.nb_in_g
-        bstart, bstop = self.bstart, self.bstop
-        nsppol, natom3 = self.nsppol, self.natom3
+        nb_in_g, bstart, all_eigens_k, all_eigens_kq, gvar = self._get_gdata(which)
+        natom3 = self.natom3
 
         # double all_eigens_k(nsppol, nk_path, nband) ;
         # double all_eigens_kq(nsppol, nq_path, nband) ;
-        all_eigens_k, all_eigens_kq = self.all_eigens_k, self.all_eigens_kq  # eV units
-        phfreqs_ha = self.phfreqs_ha                                         # Ha units
+        phfreqs_ha = self.phfreqs_ha  # Ha units
 
         # Now read the e-ph matrix elements. On disk we have
         #                                                  n-index, m-index
@@ -470,7 +616,7 @@ class GpathReader(BaseEphReader):
         #                                      m-index, n-index
         # In memory we want: (nq_path, natom3, nb_in_g, nb_in_g)
 
-        absg = np.sqrt(self.read_variable("gkq2_nu")[spin, 0][:].transpose(0, 1, 3, 2).copy()) * abu.Ha_meV
+        absg = np.sqrt(self.read_variable(gvar)[spin, 0][:].transpose(0, 1, 3, 2).copy()) * abu.Ha_meV
         absg_raw = absg.copy()
 
         # Average over degenerate phonon modes.
@@ -479,7 +625,7 @@ class GpathReader(BaseEphReader):
             for nu in range(natom3):
                 # Sum the squared values of absg over the degenerate phonon mu indices.
                 mask_nu = np.abs(phfreqs_ha[iq, :] - phfreqs_ha[iq, nu]) < eps_ha
-                g2_mn = np.sum(absg[iq, mask_nu, :, :]**2, axis=0)
+                g2_mn = np.sum(absg[iq, mask_nu, :, :] ** 2, axis=0)
                 # Compute the symmetrized value and divide by the number of degenerate ph-modes for this iq.
                 absg_avg[iq, nu, :, :] = np.sqrt(g2_mn / np.sum(mask_nu))
 
@@ -494,10 +640,11 @@ class GpathReader(BaseEphReader):
                     g2_nu[:], nn = 0.0, 0
                     for bsum_k in range(nb_in_g):
                         w_2 = all_eigens_k[spin, 0, bsum_k + bstart]
-                        if abs(w_2 - w_1) >= eps_ev: continue
+                        if abs(w_2 - w_1) >= eps_ev:
+                            continue
                         nn += 1
-                        g2_nu += absg[iq,:,m_kq,bsum_k] ** 2
-                    absg_avg[iq,:,m_kq,n_k] = np.sqrt(g2_nu / nn)
+                        g2_nu += absg[iq, :, m_kq, bsum_k] ** 2
+                    absg_avg[iq, :, m_kq, n_k] = np.sqrt(g2_nu / nn)
 
         # Average over degenerate k+q electrons taking bstart into account.
         absg = absg_avg.copy()
@@ -508,10 +655,11 @@ class GpathReader(BaseEphReader):
                     g2_nu[:], nn = 0.0, 0
                     for bsum_kq in range(nb_in_g):
                         w_2 = all_eigens_kq[spin, iq, bsum_kq + bstart]
-                        if abs(w_2 - w_1) >= eps_ev: continue
+                        if abs(w_2 - w_1) >= eps_ev:
+                            continue
                         nn += 1
-                        g2_nu += absg[iq,:,bsum_kq,n_k] ** 2
-                    absg_avg[iq,:,m_kq,n_k] = np.sqrt(g2_nu / nn)
+                        g2_nu += absg[iq, :, bsum_kq, n_k] ** 2
+                    absg_avg[iq, :, m_kq, n_k] = np.sqrt(g2_nu / nn)
 
         # Transpose the data: (nq_path, natom3, nb_in_g, nb_in_g) -> (natom3, nq_path, nb_in_g, nb_in_g)
         absg_avg, absg_raw = absg_avg.transpose(1, 0, 2, 3).copy(), absg_raw.transpose(1, 0, 2, 3).copy()
@@ -529,22 +677,40 @@ class GpathReader(BaseEphReader):
         gavg, graw = np.sum(absg_avg, axis=(-2, -1)) / nb**2, np.sum(absg_raw, axis=(-2, -1)) / nb**2
 
         # Quick and dirty hack to plot D.
-        #for nu in range(self.natom3):
+        # for nu in range(self.natom3):
         #    omegas_nu = self.phbands.phfreqs[:,nu]  # PH Frequencies are in eV
         #    gavg[nu] *= np.sqrt(omegas_nu)
         #    graw[nu] *= np.sqrt(omegas_nu)
 
         return gavg, graw
 
-    def get_gnuk_average_spin(self, spin: int, band_range: list | tuple | None, eps_mev: float = 0.01) -> tuple:
+    def get_gnuk_average_spin(
+        self,
+        spin: int,
+        band_range: list | tuple | None,
+        eps_mev: float = 0.01,
+        which: str = "abinitio",
+    ) -> tuple:
         """
-        Average g elements over phonon modes, and k- k+q electrons when the matrix elements
-        have been computed along a k-path.
+        Average g elements over phonon modes and degenerate k states when the matrix elements
+        have been computed along a k-path at fixed q.
+
+        ``all_eigens_k`` contains the path-dependent eigenvalues in this case. The
+        ``all_eigens_kq`` array is q-path dependent and therefore cannot be used to
+        average k+q degeneracies when k varies. Consequently, this routine currently
+        averages electronic degeneracies only at k, not at k+q. Supporting the latter
+        requires changing ABINIT's GPATH.nc format so that it also stores the k+q
+        eigenvalues along the k-path, e.g. in an array with dimensions
+        ``(nband, nk_path, nsppol)``. The same extension is required for the
+        Wannier-interpolated eigenvalues.
 
         Args:
             spin: spin index
             band_range: Band range that will be averaged over (python convention).
             eps_mev: Tolerance in meV used to detect degeneracies for phonons and electrons.
+            which: Select the ``"abinitio"`` or ``"wannier"`` matrix elements.
+                Wannier bands use indices in ``[0, nwan)`` and their own interpolated
+                eigenvalues when constructing the degeneracy masks.
 
         Return:
             tuple with two numpy arrays.
@@ -558,14 +724,11 @@ class GpathReader(BaseEphReader):
         eps_ev = eps_ha * abu.Ha_eV
 
         # Number of m, n bands in g_mn, the first band starts at bstart.
-        nb_in_g = self.nb_in_g
-        bstart, bstop = self.bstart, self.bstop
-        nsppol, natom3 = self.nsppol, self.natom3
+        nb_in_g, bstart, all_eigens_k, _all_eigens_kq, gvar = self._get_gdata(which)
+        natom3 = self.natom3
 
         # double all_eigens_k(nsppol, nk_path, nband) ;
-        # double all_eigens_kq(nsppol, nq_path, nband) ;
-        all_eigens_k, all_eigens_kq = self.all_eigens_k, self.all_eigens_kq  # eV units
-        phfreqs_ha = self.phfreqs_ha                                         # Ha units
+        phfreqs_ha = self.phfreqs_ha  # Ha units
 
         # Now read the e-ph matrix elements. On disk we have
         #                                                  n-index, m-index
@@ -576,7 +739,7 @@ class GpathReader(BaseEphReader):
         #                                      m-index, n-index
         # In memory we want: (nk_path, natom3, nb_in_g, nb_in_g)
 
-        absg = np.sqrt(self.read_variable("gkq2_nu")[spin, :, 0, :, :,:][:].transpose(0, 1, 3, 2).copy()) * abu.Ha_meV
+        absg = np.sqrt(self.read_variable(gvar)[spin, :, 0, :, :, :][:].transpose(0, 1, 3, 2).copy()) * abu.Ha_meV
         absg_raw = absg.copy()
 
         # Average over degenerate phonon modes for this q
@@ -586,7 +749,7 @@ class GpathReader(BaseEphReader):
             for nu in range(natom3):
                 # Sum the squared values of absg over the degenerate phonon mu indices.
                 mask_nu = np.abs(phfreqs_ha[iq, :] - phfreqs_ha[iq, nu]) < eps_ha
-                g2_mn = np.sum(absg[ik, mask_nu, :, :]**2, axis=0)
+                g2_mn = np.sum(absg[ik, mask_nu, :, :] ** 2, axis=0)
                 # Compute the symmetrized value and divide by the number of degenerate ph-modes for this iq.
                 absg_avg[ik, nu, :, :] = np.sqrt(g2_mn / np.sum(mask_nu))
 
@@ -601,23 +764,19 @@ class GpathReader(BaseEphReader):
                     g2_nu[:], nn = 0.0, 0
                     for bsum_k in range(nb_in_g):
                         w_2 = all_eigens_k[spin, ik, bsum_k + bstart]
-                        if abs(w_2 - w_1) >= eps_ev: continue
+                        if abs(w_2 - w_1) >= eps_ev:
+                            continue
                         nn += 1
-                        g2_nu += absg[ik,:,m_kq,bsum_k] ** 2
-                    absg_avg[ik,:,m_kq,n_k] = np.sqrt(g2_nu / nn)
+                        g2_nu += absg[ik, :, m_kq, bsum_k] ** 2
+                    absg_avg[ik, :, m_kq, n_k] = np.sqrt(g2_nu / nn)
 
-        # Average over degenerate k+q electrons taking bstart into account.
-        absg = absg_avg.copy()
-        for n_k in range(nb_in_g):
-            for m_kq in range(nb_in_g):
-                w_1 = all_eigens_kq[spin, 0, m_kq + bstart]
-                g2_nu[:], nn = 0.0, 0
-                for bsum_kq in range(nb_in_g):
-                    w_2 = all_eigens_kq[spin, 0, bsum_kq + bstart]
-                    if abs(w_2 - w_1) >= eps_ev: continue
-                    nn += 1
-                    g2_nu += absg[ik,:,bsum_kq,n_k] ** 2
-                absg_avg[ik,:,m_kq,n_k] = np.sqrt(g2_nu / nn)
+        # TODO: Average over degenerate k+q states as well. This cannot be done with
+        # the present ABINIT GPATH.nc format: for fixed q, all_eigens_kq has nq_path=1
+        # and contains only the spectrum associated with the first k-point. ABINIT
+        # must first write E_{k+q} for every point of the k-path (and the analogous
+        # Wannier eigenvalues). Once available, the k+q averaging must be performed
+        # inside an explicit loop over ik; reusing all_eigens_kq[spin, 0] for every
+        # ik would apply the wrong degeneracy mask.
 
         # Transpose the data: (nk_path, natom3, nb_in_g, nb_in_g) -> (natom3, nk_path, nb_in_g, nb_in_g)
         absg_avg, absg_raw = absg_avg.transpose(1, 0, 2, 3).copy(), absg_raw.transpose(1, 0, 2, 3).copy()
@@ -652,18 +811,15 @@ class GpathRobot(Robot, RobotWithEbands):
     .. rubric:: Inheritance Diagram
     .. inheritance-diagram:: GpathRobot
     """
+
     EXT = "GPATH"
 
     @add_fig_kwargs
-    def plot_g_qpath(self,
-                     which_g="avg",
-                     ph_modes=None,
-                     colormap="jet",
-                     **kwargs) -> Figure:
+    def plot_g_qpath(self, which_g="avg", ph_modes=None, colormap="jet", **kwargs) -> Figure:
         """
         Compare the g matrix elements stored in the Robot along a q-path.
 
-        Args
+        Args:
             which_g: "avg" to plot the symmetrized ``|g|``, "raw" for unsymmetrized ``|g|``."all" for both.
             ph_modes: List of ph branch indices to show (start from 0). If None all modes are show.
             colormap: Color map. Have a look at the colormaps here and decide which one you like:
@@ -675,15 +831,16 @@ class GpathRobot(Robot, RobotWithEbands):
         xs = np.arange(nq_path)
 
         nrows, ncols = 1, nsppol
-        ax_mat, fig, plt = get_axarray_fig_plt(None, nrows=nrows, ncols=ncols,
-                                               sharex=False, sharey=False, squeeze=False)
+        ax_mat, fig, plt = get_axarray_fig_plt(
+            None, nrows=nrows, ncols=ncols, sharex=False, sharey=False, squeeze=False
+        )
         cmap = plt.get_cmap(colormap)
 
         # TODO: Compute common band range.
         band_range = None
         ref_ifile = 0
-        #q_label = r"$|q|^{%d}$" % with_qexp if with_qexp else ""
-        #g_units = "(meV)" if with_qexp == 0 else r"(meV $\AA^-{%s}$)" % with_qexp
+        # q_label = r"$|q|^{%d}$" % with_qexp if with_qexp else ""
+        # g_units = "(meV)" if with_qexp == 0 else r"(meV $\AA^-{%s}$)" % with_qexp
 
         for spin in range(nsppol):
             ax_cnt = 0
@@ -692,23 +849,24 @@ class GpathRobot(Robot, RobotWithEbands):
             for ifile, gpath in enumerate(self.abifiles):
                 g_nuq_avg, g_nuq_raw = gpath.r.get_gnuq_average_spin(spin, band_range)
                 # Select ys according to which_g and multiply by facts_q
-                g_nuq = dict(avg=g_nuq_avg, raw=g_nuq_raw)[which_g] # * facts_q[None,:]
+                g_nuq = dict(avg=g_nuq_avg, raw=g_nuq_raw)[which_g]  # * facts_q[None,:]
 
                 for nu in range(natom3):
-                    if ph_modes is not None and nu not in ph_modes: continue
+                    if ph_modes is not None and nu not in ph_modes:
+                        continue
                     color = cmap(nu / natom3)
                     if ifile == ref_ifile:
                         ax.scatter(xs, g_nuq[nu], color=color, label=f"{nu=}", marker="o")
                         gpath.phbands.decorate_ax(ax, units="meV")
-                        #g_label = r"$|g^{\text{%s}}_{\mathbf{q}}|$ %s" % (which_g, q_label)
-                        #set_grid_legend(ax, fontsize, ylabel="%s %s" % (g_label, g_units))
+                        # g_label = r"$|g^{\text{%s}}_{\mathbf{q}}|$ %s" % (which_g, q_label)
+                        # set_grid_legend(ax, fontsize, ylabel="%s %s" % (g_label, g_units))
                     else:
                         ax.plot(g_nuq[nu], color=color, label=f"{nu=}")
 
         return fig
 
-    #@add_fig_kwargs
-    #def plot_g_kpath(self, **kwargs) --> Figure
+    # @add_fig_kwargs
+    # def plot_g_kpath(self, **kwargs) --> Figure
     #   """Compare the g-matrix stored in the Robot along a k-path."""
 
     def yield_figs(self, **kwargs):  # pragma: no cover
@@ -716,7 +874,7 @@ class GpathRobot(Robot, RobotWithEbands):
         This function *generates* a predefined list of matplotlib figures with minimal input from the user.
         Used in abiview.py to get a quick look at the results.
         """
-        #for fig in self.get_ebands_plotter().yield_figs(): yield fig
+        # for fig in self.get_ebands_plotter().yield_figs(): yield fig
 
     def write_notebook(self, nbpath=None) -> str:
         """
@@ -726,14 +884,16 @@ class GpathRobot(Robot, RobotWithEbands):
         nbformat, nbv, nb = self.get_nbformat_nbv_nb(title=None)
 
         args = [(l, f.filepath) for l, f in self.items()]
-        nb.cells.extend([
-            #nbv.new_markdown_cell("# This is a markdown cell"),
-            nbv.new_code_cell("robot = abilab.GstoreRobot(*%s)\nrobot.trim_paths()\nrobot" % str(args)),
-            #nbv.new_code_cell("ebands_plotter = robot.get_ebands_plotter()"),
-        ])
+        nb.cells.extend(
+            [
+                # nbv.new_markdown_cell("# This is a markdown cell"),
+                nbv.new_code_cell("robot = abilab.GstoreRobot(*%s)\nrobot.trim_paths()\nrobot" % str(args)),
+                # nbv.new_code_cell("ebands_plotter = robot.get_ebands_plotter()"),
+            ]
+        )
 
         # Mixins
-        #nb.cells.extend(self.get_baserobot_code_cells())
-        #nb.cells.extend(self.get_ebands_code_cells())
+        # nb.cells.extend(self.get_baserobot_code_cells())
+        # nb.cells.extend(self.get_ebands_code_cells())
 
         return self._write_nb_nbpath(nb, nbpath)

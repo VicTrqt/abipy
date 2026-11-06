@@ -1,20 +1,20 @@
-# coding: utf-8
 """Tests for gwr module."""
-import numpy as np
-#import pymatgen.core.units as pmgu
-import abipy.data as abidata
 
+import numpy as np
+
+# import pymatgen.core.units as pmgu
+import abipy.data as abidata
 from abipy.core.testing import AbipyTest
 from abipy.electrons.gwr import GwrFile, GwrRobot
 
 
 class GwrFileTest(AbipyTest):
-
     def test_gwr_file(self):
         """Testing GwrFile"""
         path = abidata.ref_file("t01o_DS3_GWR.nc")
         with GwrFile(abidata.ref_file(path)) as gwr:
-            repr(gwr); str(gwr)
+            repr(gwr)
+            str(gwr)
             gwr.to_string(verbose=1)
             assert gwr.structure.formula == "Si2"
             assert len(gwr.sigma_kpoints) == 2
@@ -28,14 +28,17 @@ class GwrFileTest(AbipyTest):
             self.assert_almost_equal(gwr.qpz0_dirgaps[0], [3.27446, 4.2812], decimal=5)
 
             # Minimax imaginary tau/omega mesh: !Tabular | # tau, weight(tau), omega, weight(omega)
-            ref_data = np.fromstring("""\
+            ref_data = np.fromstring(
+                """\
 2.14325E-01   5.65693E-01   1.17768E-02   2.46619E-02
 1.28479E+00   1.69883E+00   4.26019E-02   4.02802E-02
 4.04688E+00   4.16331E+00   1.02353E-01   8.69441E-02
 1.06328E+01   9.74336E+00   2.42820E-01   2.15922E-01
 2.57180E+01   2.20388E+01   6.17146E-01   6.09743E-01
-6.02382E+01   5.21455E+01   1.86465E+00   2.44712E+00""", sep=" ")
-            ref_data.shape = (6, 4)
+6.02382E+01   5.21455E+01   1.86465E+00   2.44712E+00""",
+                sep=" ",
+            )
+            ref_data = ref_data.reshape((6, 4))
 
             mesh = gwr.minimax_mesh
             assert mesh.ntau == 6
@@ -43,12 +46,12 @@ class GwrFileTest(AbipyTest):
             self.assert_almost_equal(mesh.tau_wgs, ref_data[:, 1], decimal=4)
             self.assert_almost_equal(mesh.iw_mesh, ref_data[:, 2], decimal=4)
             self.assert_almost_equal(mesh.iw_wgs, ref_data[:, 3], decimal=4)
-            self.assert_almost_equal(mesh.min_transition_energy_eV, 3.31673712E-02)
-            self.assert_almost_equal(mesh.max_transition_energy_eV, 1.89598634E+00)
-            self.assert_almost_equal(mesh.ft_max_err_t2w_cos, 1.69754098E-02)
-            self.assert_almost_equal(mesh.ft_max_err_w2t_cos, 5.30899614E-04)
-            self.assert_almost_equal(mesh.ft_max_err_t2w_sin, 3.37573093E-01)
-            self.assert_almost_equal(mesh.cosft_duality_error, 7.86624507E-04)
+            self.assert_almost_equal(mesh.min_transition_energy_eV, 3.31673712e-02)
+            self.assert_almost_equal(mesh.max_transition_energy_eV, 1.89598634e00)
+            self.assert_almost_equal(mesh.ft_max_err_t2w_cos, 1.69754098e-02)
+            self.assert_almost_equal(mesh.ft_max_err_w2t_cos, 5.30899614e-04)
+            self.assert_almost_equal(mesh.ft_max_err_t2w_sin, 3.37573093e-01)
+            self.assert_almost_equal(mesh.cosft_duality_error, 7.86624507e-04)
 
             params = gwr.params
             assert params["gwr_ntau"] == 6
@@ -57,6 +60,12 @@ class GwrFileTest(AbipyTest):
 
             gas_df = gwr.get_dirgaps_dataframe(with_params=True, with_geo=True)
             df = gwr.get_dataframe_sk(spin=0, kpoint=0, with_params=True, with_geo=True)
+            qp_band4 = df.loc[4]
+            self.assert_almost_equal(qp_band4["e0"], 2.0029493070548754)
+            self.assert_almost_equal(qp_band4["qpe"].real, 2.8977755013563673)
+            self.assert_almost_equal(qp_band4["qpe"].imag, -0.04846334314567554)
+            self.assert_almost_equal(qp_band4["sigxme"], -4.986994486723799)
+            self.assert_almost_equal(qp_band4["sigcmee0"], -3.8861004365062053 - 0.051235234159516106j)
 
             if self.has_matplotlib():
                 assert mesh.plot_ft_weights(mesh, show=False)
@@ -68,10 +77,11 @@ class GwrFileTest(AbipyTest):
 
             if self.has_nbformat():
                 assert gwr.write_notebook(nbpath=self.get_tmpname(text=True))
-        
+
         path = abidata.ref_file("out_DS3_GWR.nc")
         with GwrFile(abidata.ref_file(path)) as gwr:
-            repr(gwr); str(gwr)
+            repr(gwr)
+            str(gwr)
             assert gwr.plot_qpgaps_iterations(show=False)
 
     def test_gwr_robot(self):
@@ -90,8 +100,8 @@ class GwrFileTest(AbipyTest):
                 assert robot.plot_selfenergy_conv(spin, kpoint, band, show=False)
                 assert robot.plot_qpgaps_convergence(x="gwr_ntau", abs_conv=0.05, show=False)
                 # FIXME
-                #assert robot.plot_qpfield_vs_e0("qpe", show=False)
-                #assert robot.plot_qpdata_conv_skb(spin, kpoint, band, show=False)
+                # assert robot.plot_qpfield_vs_e0("qpe", show=False)
+                # assert robot.plot_qpdata_conv_skb(spin, kpoint, band, show=False)
 
             if self.has_nbformat():
                 assert robot.write_notebook(nbpath=self.get_tmpname(text=True))

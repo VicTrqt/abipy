@@ -1,18 +1,21 @@
 """
 Integration tests for flows (require pytest, ABINIT and a properly configured environment)
 """
+
 from __future__ import annotations
 
 import os
 import unittest
-#import numpy.testing.utils as nptu
-import numpy.testing as nptu
-import abipy.data as abidata
-import abipy.flowtk as flowtk
-import abipy.flowtk.abiphonopy as abiph
 
+# import numpy.testing.utils as nptu
+import numpy.testing as nptu
+
+import abipy.data as abidata
+import abipy.flowtk.abiphonopy as abiph
+from abipy import flowtk
 from abipy.abio.factories import gs_input
 from abipy.core.testing import has_phonopy
+from abipy.integration_tests.helpers import assert_flow_ok
 
 
 def itest_phonopy_flow(fwp, tvars):
@@ -22,7 +25,7 @@ def itest_phonopy_flow(fwp, tvars):
     if not has_phonopy():
         raise unittest.SkipTest("This test requires phonopy")
 
-    #print("tvars:\n %s" % str(tvars))
+    # print("tvars:\n %s" % str(tvars))
     si_structure = abidata.structure_from_cif("si.cif")
 
     gsinp = gs_input(si_structure, pseudos=abidata.pseudos("14si.pspnc"), kppa=10, ecut=2, spin_mode="unpolarized")
@@ -30,8 +33,7 @@ def itest_phonopy_flow(fwp, tvars):
 
     flow = flowtk.Flow(workdir=fwp.workdir, manager=fwp.manager)
     scdims = [2, 2, 2]
-    phpy_work = abiph.PhonopyWork.from_gs_input(gsinp, scdims=scdims,
-                                                phonopy_kwargs=None, displ_kwargs=None)
+    phpy_work = abiph.PhonopyWork.from_gs_input(gsinp, scdims=scdims, phonopy_kwargs=None, displ_kwargs=None)
     flow.register_work(phpy_work)
 
     assert hasattr(phpy_work, "phonon")
@@ -46,14 +48,8 @@ def itest_phonopy_flow(fwp, tvars):
 
     flow.build_and_pickle_dump(abivalidate=True)
     scheduler = flow.make_scheduler()
-    assert scheduler.start() == 0
-
-    assert not scheduler.exceptions
-    flow.show_status()
-    if not flow.all_ok:
-        flow.debug()
-        raise RuntimeError()
-    assert all(work.finalized for work in flow)
+    scheduler.start()
+    assert_flow_ok(flow, scheduler)
 
     # The WFK files should have been removed because we called set_garbage_collector
     for task in flow[0]:
@@ -75,7 +71,7 @@ def itest_phonopy_gruneisen_flow(fwp, tvars):
     if not has_phonopy():
         raise unittest.SkipTest("This test requires phonopy")
 
-    #print("tvars:\n %s" % str(tvars))
+    # print("tvars:\n %s" % str(tvars))
     si_structure = abidata.structure_from_cif("si.cif")
 
     gsinp = gs_input(si_structure, pseudos=abidata.pseudos("14si.pspnc"), kppa=10, ecut=2, spin_mode="unpolarized")
@@ -85,8 +81,9 @@ def itest_phonopy_gruneisen_flow(fwp, tvars):
     scdims = [2, 2, 2]
 
     # Grunesein with phonopy
-    grun_work = abiph.PhonopyGruneisenWork.from_gs_input(gsinp, voldelta=0.1, scdims=scdims,
-                                                         phonopy_kwargs=None, displ_kwargs=None)
+    grun_work = abiph.PhonopyGruneisenWork.from_gs_input(
+        gsinp, voldelta=0.1, scdims=scdims, phonopy_kwargs=None, displ_kwargs=None
+    )
     flow.register_work(grun_work)
     assert len(grun_work) == 3
     nptu.assert_equal(scdims, grun_work.scdims)
@@ -97,20 +94,15 @@ def itest_phonopy_gruneisen_flow(fwp, tvars):
 
     flow.build_and_pickle_dump(abivalidate=True)
     scheduler = flow.make_scheduler()
-    assert scheduler.start() == 0
-
-    assert not scheduler.exceptions
-    flow.show_status()
-    if not flow.all_ok:
-        flow.debug()
-        raise RuntimeError()
+    scheduler.start()
+    assert_flow_ok(flow, scheduler, check_finalized=False)
     # Initialial work + 3 phonopy works.
     assert len(flow) == 4
     assert all(work.finalized for work in flow)
 
     # The WFK files should have been removed because we called set_garbage_collector
     # FIXME: This does not work because new works that have been created.
-    #for task in flow.iflat_tasks():
+    # for task in flow.iflat_tasks():
     #    assert not task.outdir.has_abiext("WFK")
 
     for work in flow[1:]:

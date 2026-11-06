@@ -105,10 +105,9 @@ Clone the `github repository <https://github.com/abinit/abipy>`_ with::
 
     git clone https://github.com/abinit/abipy
 
-For pip, use::
+For pip, install AbiPy in editable mode with its optional dependencies::
 
-    pip install -r requirements.txt
-    pip install -r requirements-optional.txt
+    python -m pip install --editable ".[optional]"
 
 If you are using conda_ (see `Installing conda`_ to install conda itself), create a new environment (``abienv``) with::
 
@@ -120,21 +119,17 @@ Add ``conda-forge``, and ``abinit`` to your channels with::
     conda config --add channels conda-forge
     conda config --add channels abinit
 
-and install the AbiPy dependencies with::
+Install ABINIT with conda and AbiPy with pip so that dependencies are read from
+``pyproject.toml``::
 
-    conda install --file ./requirements.txt
-    conda install --file ./requirements-optional.txt
+    conda install abinit -c conda-forge
+    python -m pip install --editable ".[optional]"
 
-The second command is needed for Jupyter only.
-Once the requirements have been installed (either with pip or conda), execute::
+The ``optional`` extra includes Jupyter and other optional analysis libraries.
+For a complete development installation, including tests and Panel applications, use::
 
-    python setup.py install
+    ./pip_all.sh
 
-or alternately::
-
-    python setup.py develop
-
-to install the package in developmental mode.
 This is the recommended approach, especially if you are planning to implement new features.
 
 Also note that the BLAS/Lapack libraries provided by conda have multithreading support activated by default.
@@ -164,7 +159,7 @@ Unit tests require ``scripttest`` that can be installed with::
     pip install scripttest
 
 Two tests rely on the availability of a
-`pymatgen PMG_MAPI_KEY <http://pymatgen.org/usage.html#setting-the-pmg-mapi-key-in-the-config-file>` in ~/.pmgrc.yaml.
+`pymatgen PMG_MAPI_KEY <http://pymatgen.org/usage.html#setting-the-pmg-mapi-key-in-the-config-file>`_ in ~/.pmgrc.yaml.
 
 Note that several unit tests check the integration between AbiPy and Abinit.
 In order to run the tests, you will need a working set of Abinit executables and  a ``manager.yml`` configuration file.
@@ -215,7 +210,7 @@ At this step, AbiPy might fail to install due to missing/incompatible packages.
 Some of these issues may be solved by repeating the above steps (excluding the environment creation) for packages that are listed as missing/incompatible during the installation procedure, by updating the requirements.txt and packages/ and trying to install again.
 Upon reading::
 
-	Successfully installed abipy-x.y.z
+    Successfully installed abipy-x.y.z
 
 You can quickly test your installation by running ``python`` followed by ``import abipy``.
 
@@ -261,7 +256,7 @@ to check that the python installation is OK::
 then quit the interpreter.
 
 For general information about how to troubleshoot problems that may occur at this level,
-see the :ref:`troubleshooting` section.
+see the `troubleshooting`_ section.
 
 .. _anaconda_howto:
 
@@ -456,21 +451,21 @@ How to contribute
 
 To contribute to Abipy, the standard procedure is as follows:
 
-1.	Fork the repository by clicking the fork button at the top of the screen.
+1. Fork the repository by clicking the fork button at the top of the screen.
 
-2.	Clone your repository locally using::
+2. Clone your repository locally using::
 
-        git clone https://github.com/USERNAME/abipy.git
+    git clone https://github.com/USERNAME/abipy.git
 
-    where USERNAME is your GitHub username.
+   where USERNAME is your GitHub username.
 
-3.	Register the upstream repository with::
+3. Register the upstream repository with::
 
-        git remote add trunk https://github.com/abinit/abipy.git
+    git remote add trunk https://github.com/abinit/abipy.git
 
-4.  Pull the latest commit from the develop branch of trunk with::
+4. Pull the latest commit from the develop branch of trunk with::
 
-        git pull trunk develop
+    git pull trunk develop
 
 5. Modify the code and commit your changes to your fork using::
 
