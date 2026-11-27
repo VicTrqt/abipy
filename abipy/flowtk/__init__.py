@@ -23,6 +23,7 @@ from .flows import (
     phonon_conv_flow,
     g0w0_flow,
     NonLinearCoeffFlow,
+    NonLinearCoeffFullDfptFlow,
 )
 from .abitimer import AbinitTimerParser, AbinitTimerSection
 from .events import EventsParser, autodoc_event_handlers

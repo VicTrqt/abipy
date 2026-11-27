@@ -45,7 +45,7 @@ from .events import EventsParser
 from .nodes import Dependency, GarbageCollector, Node, NodeError, NodeResults, Status, check_spectator
 from .tasks import FixQueueCriticalError, ScfTask, Task, TaskManager
 from .utils import Directory, Editor, File
-from .works import BandStructureWork, DteWork, G0W0Work, NodeContainer, PhononWork, QptdmWork, Work
+from .works import BandStructureWork, DteWork, DteWorkFullDfpt, G0W0Work, NodeContainer, PhononWork, QptdmWork, Work
 
 if TYPE_CHECKING:  # needed to avoid circular imports
     from abipy.abio.inputs import AbinitInput
@@ -3446,6 +3446,90 @@ class NonLinearCoeffFlow(Flow):
         scf_task = flow[0][0]
 
         nl_work = DteWork.from_scf_task(scf_task)
+        flow.register_work(nl_work)
+
+        if allocate:
+            flow.allocate()
+
+        return flow
+
+    def open_final_ddb(self):
+        """
+        Open the DDB file located in the output directory of the flow.
+
+        Return:
+            |DdbFile| object, None if file could not be found or file is not readable.
+        """
+        ddb_path = self.outdir.has_abiext("DDB")
+        if not ddb_path:
+            if self.status == self.S_OK:
+                self.history.critical("%s reached S_OK but didn't produce a GSR file in %s" % (self, self.outdir))
+            return None
+
+        from abipy.dfpt.ddb import DdbFile
+
+        try:
+            return DdbFile(ddb_path)
+        except Exception as exc:
+            self.history.critical("Exception while reading DDB file at %s:\n%s" % (ddb_path, str(exc)))
+            return None
+
+    def finalize(self) -> int:
+        """This method is called when the flow is completed."""
+        # Merge all the out_DDB files found in work.outdir.
+        ddb_files = list(filter(None, [work.outdir.has_abiext("DDB") for work in self]))
+
+        # Final DDB file will be produced in the outdir of the work.
+        out_ddb = self.outdir.path_in("out_DDB")
+        desc = "DDB file merged by %s on %s" % (self.__class__.__name__, time.asctime())
+
+        mrgddb = wrappers.Mrgddb(manager=self.manager, verbose=0)
+        mrgddb.merge(self.outdir.path, ddb_files, out_ddb=out_ddb, description=desc)
+
+        print("Final DDB file available at %s" % out_ddb)
+
+        # Call the method of the super class.
+        return super().finalize()
+
+
+class NonLinearCoeffFullDfptFlow(Flow):
+    """
+    Flow for the computation of the static second-order non-linear susceptibility
+    (SHG tensor d_ijk) with the full-DFPT formalism: optdriver=5 with usepead=0
+    (the electric field is treated analytically, DAPE formalism of Veithen et al.,
+    PRB 71, 125107 (2005)), as opposed to the PEAD formalism (usepead=1) used by
+    |NonLinearCoeffFlow|.
+
+    1) One work for the GS-SCF run (kptopt=1, producing the WFK and DEN files).
+
+    2) One |DteWorkFullDfpt| with the NSCF, DDK, DDE, DKDK, DKDE and DTE tasks.
+       The final DDB file (2nd + 3rd order blocks merged with mrgddb) is produced
+       in the outdir of the flow and can be analyzed with anaget_nlo.
+    """
+
+    @classmethod
+    def from_scf_input(cls, workdir: str, scf_input: AbinitInput, manager=None, allocate=True) -> NonLinearCoeffFullDfptFlow:
+        """
+        Create a `NonLinearCoeffFullDfptFlow` for the full-DFPT (usepead=0) computation of the
+        third-order susceptibility from an `AbinitInput` defining a ground-state run.
+
+        The GS-SCF input must run on the IBZ and produce the WFK and DEN files, i.e. it must
+        have kptopt=1, prtwf=1, prtden=1 (and occopt=1, required by optdriver=5 with usepead=0);
+        a ValueError is raised otherwise (see |DteWorkFullDfpt|). This is dataset 1 of
+        tutorespfn/Input/tnlo_6.abi.
+
+        Args:
+            workdir: Working directory of the flow.
+            scf_input: |AbinitInput| object with the parameters for the GS-SCF run.
+            manager: |TaskManager| object. Read from `manager.yml` if None.
+            allocate: True if the flow should be allocated before returning.
+        """
+        flow = cls(workdir, manager=manager)
+
+        flow.register_scf_task(scf_input)
+        scf_task = flow[0][0]
+
+        nl_work = DteWorkFullDfpt.from_scf_task(scf_task)
         flow.register_work(nl_work)
 
         if allocate:

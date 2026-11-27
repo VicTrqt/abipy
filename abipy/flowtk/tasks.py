@@ -4214,29 +4214,52 @@ class DfptTask(AbinitTask):
 
                     my_symlink(out_ddk, infile)
 
-                elif d == "DKDK":
-                    # DKDK corresponds to ipert == dtset%natom + 10, see m_dfpt_looppert.
+                elif d in ("DKDK", "DKDE"):
+                    # DKDK corresponds to ipert == dtset%natom + 10 and DKDE to ipert == dtset%natom + 11,
+                    # see m_dfpt_looppert.
                     # In principle we can have 9 entries although d_ij = d_ji
                     #
-                    # for (ipert > = dtset%natom + 10) we have:
+                    # for (ipert >= dtset%natom + 10) we have:
                     # pertcase = idir + (ipert-dtset%natom-10)*9 + (dtset%natom+6)*3
-                    # and file extensions 1WFK[pertcase].
+                    # and file extensions 1WF[pertcase].
                     #
-                    ipert = natom + 10
+                    ipert = natom + 10 if d == "DKDK" else natom + 11
                     possible_pertcases = [idir + (ipert - natom - 10) * 9 + (natom + 6) * 3 for idir in range(1, 10)]
                     ext_list = ["1WF%d" % p for p in possible_pertcases]
 
-                    dkdk_task = dep.node
-                    dkdk_filepaths = []
+                    rf2_task = dep.node
+                    rf2_filepaths = []
                     for ext in ext_list:
-                        p = dkdk_task.outdir.has_abiext(ext)
+                        p = rf2_task.outdir.has_abiext(ext)
                         if p:
-                            dkdk_filepaths.append(p)
+                            rf2_filepaths.append(p)
 
-                    if not dkdk_filepaths:
-                        raise RuntimeError("%s didn't produce any DKDK file:" % dkdk_task)
+                    if not rf2_filepaths:
+                        raise RuntimeError("%s didn't produce any %s file" % (rf2_task, d))
 
-                    for out_path in dkdk_filepaths:
+                    for out_path in rf2_filepaths:
+                        infile = self.indir.path_in(os.path.basename(out_path))
+                        infile = infile.replace("out_", "in_", 1)
+                        my_symlink(out_path, infile)
+
+                elif d == "DELFD":
+                    # DELFD corresponds to the 1st-order wavefunctions wrt the electric field,
+                    # ipert == dtset%natom + 2, pertcase = idir + 3*(ipert-1), see m_dfpt_looppert.
+                    ipert = natom + 2
+                    possible_pertcases = [idir + 3 * (ipert - 1) for idir in range(1, 4)]
+                    ext_list = ["1WF%d" % p for p in possible_pertcases]
+
+                    dde_task = dep.node
+                    delfd_filepaths = []
+                    for ext in ext_list:
+                        p = dde_task.outdir.has_abiext(ext)
+                        if p:
+                            delfd_filepaths.append(p)
+
+                    if not delfd_filepaths:
+                        raise RuntimeError("%s didn't produce any DELFD (electric field 1WF) file" % dde_task)
+
+                    for out_path in delfd_filepaths:
                         infile = self.indir.path_in(os.path.basename(out_path))
                         infile = infile.replace("out_", "in_", 1)
                         my_symlink(out_path, infile)
@@ -4394,6 +4417,16 @@ class DkdkTask(DfptTask):
     """
 
     color_rgb = np.array((0, 122, 204)) / 255
+
+
+class DkdeTask(DfptTask):
+    """
+    Task for the computation of d2/dkde wave functions (mixed 2nd derivative
+    with respect to wavevector and electric field), needed by the full-DFPT
+    (usepead=0) non-linear response.
+    """
+
+    color_rgb = np.array((204, 122, 0)) / 255
 
 
 class BecTask(DfptTask):

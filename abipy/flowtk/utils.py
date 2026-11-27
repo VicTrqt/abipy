@@ -529,9 +529,9 @@ _EXT2VARS = {
     "KERANGE.nc": {"getkerange_filepath": '"indata/in_KERANGE.nc"'},
     "POT": {"getpot_filepath": '"indata/in_POT"'},
     "SIGEPH": {"getsigeph_filepath": '"indata/in_SIGEPH.nc"'},
-    "DKDK": {},  # irddkdk is not defined.
-    # "DKDE": {"getdkde": 1},
-    # "DELFD": {"getdelfd": 1},
+    "DKDK": {},  # irddkdk is defined in abinit >= 10.5 but not set here to preserve backward compatibility.
+    "DKDE": {"irddkde": 1},
+    "DELFD": {"irddelfd": 1},
     "GSTORE": {"getgstore_filepath": '"indata/in_GSTORE.nc"'},
     "HIST": {},
 }
