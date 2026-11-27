@@ -80,19 +80,29 @@ qadapters:
     def build_flow(self):
         """Build a NonLinearCoeffFullDfptFlow in self.workdir and return (flow, scf_task, work)."""
         scf_input = self.get_gsinput_si()
+        # GS-SCF settings required by the full-DFPT chain (tnlo_6 dataset 1).
+        scf_input.set_vars(kptopt=1, prtwf=1, prtden=1)
         flow = flowtk.NonLinearCoeffFullDfptFlow.from_scf_input(self.workdir, scf_input, manager=self.manager)
         scf_task = flow[0][0]
         work = flow[1]
         assert isinstance(work, flowtk.DteWorkFullDfpt)
         return flow, scf_task, work
 
+    def test_invalid_scf_input(self):
+        """A GS input that cannot produce the WFK/DEN on the IBZ must raise a clear error."""
+        scf_input = self.get_gsinput_si()
+        scf_input.set_vars(kptopt=1, prtwf=1, prtden=1)
+        for bad_vars in ({"prtwf": 0}, {"prtden": 0}, {"kptopt": 3}, {"occopt": 7}):
+            scf_input.set_vars(**bad_vars)
+            with self.assertRaises(ValueError):
+                flowtk.NonLinearCoeffFullDfptFlow.from_scf_input(self.workdir, scf_input, manager=self.manager)
+
     def test_from_scf_task(self):
         """Test the task graph and the inputs of DteWorkFullDfpt."""
         flow, scf_task, work = self.build_flow()
-        # The GS-SCF settings required by the full-DFPT chain are enforced on the SCF input.
+        # The SCF input is used as given by the user (no silent modification).
         assert scf_task.input["kptopt"] == 1
         assert scf_task.input["prtwf"] == 1 and scf_task.input["prtden"] == 1
-        assert scf_task.input["occopt"] == 1
 
         # 1 NSCF + 3 DDK + 3 DDE + 1 DKDK + 1 DKDE + 1 DTE
         assert len(work) == 10

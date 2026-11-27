@@ -2507,6 +2507,21 @@ class DteWorkFullDfpt(Work, MergeDdb):
         if not isinstance(scf_task, (ScfTask, NscfTask)):
             raise TypeError(f"task {scf_task} does not inherit from ScfTask|NscfTask")
 
+        # The GS task must run on the IBZ (kptopt=1) and produce both the WFK and the DEN file:
+        # the NSCF task reads the two of them (tnlo_6 dataset 1 -> dataset 2).
+        # occopt=1 is required by the full-DFPT non-linear driver (optdriver=5, usepead=0).
+        # ABINIT defaults are 1 for all these variables, hence the default in .get.
+        required = {"kptopt": 1, "prtwf": 1, "prtden": 1, "occopt": 1}
+        wrong = {k: scf_task.input.get(k, 1) for k in required if scf_task.input.get(k, 1) != required[k]}
+        if wrong:
+            raise ValueError(
+                f"{cls.__name__} requires the GS-SCF input to have {required} "
+                f"(ABINIT defaults are 1), but got {wrong}. "
+                "kptopt=1 with prtwf=1 and prtden=1 is needed so that the GS task produces the WFK and "
+                "DEN files read by the NSCF task on the half-BZ; occopt=1 is enforced by ABINIT for "
+                "optdriver=5 with usepead=0. See dataset 1 of tutorespfn/Input/tnlo_6.abi."
+            )
+
         if ddk_tolerance is None:
             ddk_tolerance = {"tolwfr": 1.0e-22}
         if dde_tolerance is None:

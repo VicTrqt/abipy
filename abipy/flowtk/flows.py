@@ -3513,9 +3513,10 @@ class NonLinearCoeffFullDfptFlow(Flow):
         Create a `NonLinearCoeffFullDfptFlow` for the full-DFPT (usepead=0) computation of the
         third-order susceptibility from an `AbinitInput` defining a ground-state run.
 
-        The SCF input is used as a template: kptopt=1, prtden=1, prtwf=1 and occopt=1 are
-        enforced on a copy of the input so that the GS task produces the WFK and DEN files
-        required by the response tasks (dataset 1 of tutorespfn/Input/tnlo_6.abi).
+        The GS-SCF input must run on the IBZ and produce the WFK and DEN files, i.e. it must
+        have kptopt=1, prtwf=1, prtden=1 (and occopt=1, required by optdriver=5 with usepead=0);
+        a ValueError is raised otherwise (see |DteWorkFullDfpt|). This is dataset 1 of
+        tutorespfn/Input/tnlo_6.abi.
 
         Args:
             workdir: Working directory of the flow.
@@ -3524,10 +3525,6 @@ class NonLinearCoeffFullDfptFlow(Flow):
             allocate: True if the flow should be allocated before returning.
         """
         flow = cls(workdir, manager=manager)
-
-        # Enforce the GS-SCF settings required by the full-DFPT chain.
-        scf_input = scf_input.deepcopy()
-        scf_input.set_vars(kptopt=1, prtden=1, prtwf=1, occopt=1)
 
         flow.register_scf_task(scf_input)
         scf_task = flow[0][0]
