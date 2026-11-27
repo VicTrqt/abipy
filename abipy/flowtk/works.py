@@ -35,6 +35,7 @@ from .tasks import (
     DdeTask,
     DdkTask,
     DfptTask,
+    DkdeTask,
     DkdkTask,
     DteTask,
     EffMassTask,
@@ -81,6 +82,7 @@ __all__ = [
     "BseMdfWork",
     "ConducWork",
     "DteWork",
+    "DteWorkFullDfpt",
     "G0W0Work",
     "GKKPWork",
     "PhononWfkqWork",
@@ -478,6 +480,11 @@ class NodeContainer(metaclass=abc.ABCMeta):
     def register_dkdk_task(self, *args, **kwargs) -> DkdkTask:
         """Register a DkdkTask task."""
         kwargs["task_class"] = DkdkTask
+        return self.register_task(*args, **kwargs)
+
+    def register_dkde_task(self, *args, **kwargs) -> DkdeTask:
+        """Register a DkdeTask task."""
+        kwargs["task_class"] = DkdeTask
         return self.register_task(*args, **kwargs)
 
     def register_quad_task(self, *args, **kwargs) -> QuadTask:
@@ -2451,6 +2458,153 @@ class DteWork(Work, MergeDdb):
         This method is called when all tasks reach S_OK
         It runs `mrgddb` in sequential on the local machine to produce
         the final DDB file in the outdir of the `Work`.
+        """
+        # Merge DDB files.
+        out_ddb = self.merge_ddb_files(only_dfpt_tasks=True)
+        return self.Results(node=self, returncode=0, message="DDB merge done")
+
+
+class DteWorkFullDfpt(Work, MergeDdb):
+    """
+    Work for the computation of the third derivative of the energy (static SHG tensor d_ijk)
+    in the full-DFPT formalism, i.e. optdriver=5 with usepead=0 (the electric field is treated
+    analytically, DAPE formalism of Veithen et al., PRB 71, 125107 (2005)), as opposed to the
+    PEAD formalism (usepead=1) used by |DteWork|.
+
+    This work is the flow-native equivalent of the 7-dataset multiset
+    `tutorespfn/Input/tnlo_6.abi` (restricted to the purely electric EEE perturbations).
+    Each dataset of the multiset becomes one abipy task:
+
+        - 1 NSCF task (kptopt=2, iscf=-2) producing the WFK on the half-BZ (tnlo_6 dataset 2)
+        - 3 DDK tasks (rfelfd=2, iscf=-3) (tnlo_6 dataset 3)
+        - 3 DDE tasks (rfelfd=3, prepanl=1) producing the 1WF/1DEN files (tnlo_6 dataset 4)
+        - 1 DKDK task (rf2_dkdk=1, prepanl=1) (tnlo_6 dataset 5)
+        - 1 DKDE task (rf2_dkde=1, prepanl=1) (tnlo_6 dataset 6)
+        - 1 DTE task (optdriver=5, usepead=0, d3e_pert1/2/3_elfd=1) (tnlo_6 dataset 7)
+
+    The `scf_task` must produce both the WFK and the DEN file (e.g. kptopt=1 with
+    prtwf=1 and prtden=1) since the NSCF task reads both.
+
+    It provides the callback method (on_all_ok) that calls mrgddb to merge the partial
+    DDB files produced by the work (2nd-order blocks from the DDE tasks and the 3rd-order
+    block from the DTE task), so that anaget_nlo can be used on the merged DDB.
+
+    .. rubric:: Inheritance Diagram
+    .. inheritance-diagram:: DteWorkFullDfpt
+    """
+
+    @classmethod
+    def from_scf_task(cls, scf_task: ScfTask, ddk_tolerance=None, dde_tolerance=None, manager=None) -> DteWorkFullDfpt:
+        """
+        Build a DteWorkFullDfpt from a ground-state task.
+
+        Args:
+            scf_task: |ScfTask| object. Must produce the WFK and DEN files (prtwf=1, prtden=1).
+            ddk_tolerance: tolerance used in the DDK/DKDK/DKDE runs. None to use AbiPy default {"tolwfr": 1e-22}.
+            dde_tolerance: tolerance used in the DDE run. None to use {"tolvrs": 1e-12}.
+            manager: |TaskManager| object.
+        """
+        if not isinstance(scf_task, (ScfTask, NscfTask)):
+            raise TypeError(f"task {scf_task} does not inherit from ScfTask|NscfTask")
+
+        if ddk_tolerance is None:
+            ddk_tolerance = {"tolwfr": 1.0e-22}
+        if dde_tolerance is None:
+            dde_tolerance = {"tolvrs": 1.0e-12}
+
+        new = cls(manager=manager)
+
+        # Template input for all the response tasks.
+        gs_inp = scf_task.input.deepcopy()
+        gs_inp.pop_irdvars()
+
+        # Non-linear calculations do not accept more bands than those in the valence.
+        # occopt=1 and nbdbuf=0 are required by the full-DFPT non-linear driver.
+        nval = gs_inp.structure.num_valence_electrons(gs_inp.pseudos)
+        nval -= gs_inp.get("charge", 0)
+        nband = int(round(nval / 2))
+
+        def set_response_vars(inp):
+            inp.set_vars(occopt=1, nband=nband)
+            inp.pop("nbdbuf", None)
+            return inp
+
+        # Dataset 2 of tnlo_6.abi: NSCF run on the half-BZ (kptopt=2) producing the WFK
+        # read by all the response tasks.
+        nscf_input = gs_inp.new_with_vars(
+            iscf=-2,  # non-self-consistent calculation
+            kptopt=2,  # Half Brillouin Zone (only time-reversal symmetry)
+            prtwf=1,  # save WF on disk, will be used by the other tasks
+            comment="NSCF run on the half-BZ for the full-DFPT non-linear calculation.",
+        )
+        nscf_input.pop_tolerances()
+        nscf_input.set_vars(tolwfr=1.0e-22)  # high precision needed for response
+        set_response_vars(nscf_input)
+        nscf_task = new.register_nscf_task(nscf_input, deps={scf_task: "WFK DEN"})
+        new.nscf_task = nscf_task
+
+        # Dataset 3 of tnlo_6.abi: DDK calculations (one task per direction).
+        multi_ddk = gs_inp.make_ddk_inputs(tolerance=ddk_tolerance, kptopt=2)
+        ddk_tasks = []
+        for ddk_inp in multi_ddk:
+            set_response_vars(ddk_inp)
+            ddk_inp.set_vars(prtwf=1)
+            ddk_task = new.register_ddk_task(ddk_inp, deps={nscf_task: "WFK"})
+            ddk_tasks.append(ddk_task)
+        new.ddk_tasks = ddk_tasks
+
+        # Dataset 4 of tnlo_6.abi (purely electric part): DDE calculations, one task per direction.
+        # prepanl=1 is set by make_dde_inputs(use_symmetries=False). The tasks must produce the
+        # 1WF and 1DEN files read by the DKDE and DTE tasks.
+        multi_dde = gs_inp.make_dde_inputs(tolerance=dde_tolerance, use_symmetries=False)
+        dde_deps = dict.fromkeys(ddk_tasks, "DDK")
+        dde_deps.update({nscf_task: "WFK"})
+        dde_tasks = []
+        for dde_inp in multi_dde:
+            set_response_vars(dde_inp)
+            dde_inp.set_vars(prtwf=1, prtden=1)
+            dde_task = new.register_dde_task(dde_inp, deps=dde_deps)
+            dde_tasks.append(dde_task)
+        new.dde_tasks = dde_tasks
+
+        # Dataset 5 of tnlo_6.abi: DKDK calculation (2nd-order WF derivatives wrt k).
+        dkdk_inp = gs_inp.make_dkdk_input(rf2_dkdk=1, tolerance=ddk_tolerance, kptopt=2)
+        set_response_vars(dkdk_inp)
+        dkdk_inp.set_vars(prepanl=1, prtwf=1)
+        dkdk_deps = dict.fromkeys(ddk_tasks, "DDK")
+        dkdk_deps.update({nscf_task: "WFK"})
+        dkdk_task = new.register_dkdk_task(dkdk_inp, deps=dkdk_deps)
+        new.dkdk_task = dkdk_task
+
+        # Dataset 6 of tnlo_6.abi: DKDE calculation (mixed 2nd-order WF derivatives wrt k and E).
+        dkde_inp = gs_inp.make_dkde_input(rf2_dkde=1, tolerance=ddk_tolerance, kptopt=2)
+        set_response_vars(dkde_inp)
+        dkde_deps = dict.fromkeys(ddk_tasks, "DDK")
+        dkde_deps.update({nscf_task: "WFK"})
+        dkde_deps.update(dict.fromkeys(dde_tasks, ["1DEN", "DELFD"]))
+        dkde_deps.update({dkdk_task: "DKDK"})
+        dkde_task = new.register_dkde_task(dkde_inp, deps=dkde_deps)
+        new.dkde_task = dkde_task
+
+        # Dataset 7 of tnlo_6.abi: DTE calculation in the full-DFPT formalism (usepead=0).
+        # A single task loops internally over the 27 electric-field triples.
+        dte_inp = gs_inp.make_dte_fulldfpt_input()
+        dte_deps = dict.fromkeys(ddk_tasks, "DDK")
+        dte_deps.update({nscf_task: "WFK"})
+        dte_deps.update(dict.fromkeys(dde_tasks, ["1WF", "1DEN"]))
+        dte_deps.update({dkde_task: "DKDE"})
+        dte_task = new.register_dte_task(dte_inp, deps=dte_deps)
+        new.dte_task = dte_task
+
+        return new
+
+    def on_all_ok(self):
+        """
+        This method is called when all tasks reach S_OK
+        It runs `mrgddb` in sequential on the local machine to produce
+        the final DDB file in the outdir of the `Work`.
+        The merge includes both the 2nd-order blocks (DDE tasks) and the
+        3rd-order block (DTE task) so that anaget_nlo can compute the SHG tensor.
         """
         # Merge DDB files.
         out_ddb = self.merge_ddb_files(only_dfpt_tasks=True)
