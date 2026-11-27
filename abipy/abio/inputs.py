@@ -2265,6 +2265,52 @@ with the Abinit version you are using? Please contact the AbiPy developers."""
 
         return dkdk_input
 
+    def make_dkde_input(self, rf2_dkde, tolerance=None, kptopt=2, manager=None) -> AbinitInput:
+        """
+        Return an input for performing d2/dkde calculations (mixed second derivative of the
+        wavefunctions with respect to wavevector and electric field, ipert = natom+11).
+        This is an auxiliary quantity needed by the full-DFPT (usepead=0) non-linear response
+        (optdriver=5). This function should be called with an input that represents a GS run.
+
+        Args:
+            rf2_dkde: Abinit input variable.
+            tolerance: dict {varname: value} with the tolerance to be used in the DFPT run.
+                Defaults to {"tolwfr": 1.0e-22}.
+            kptopt: 2 to take into account time-reversal symmetry. Note that kptopt 1 is not available.
+            manager: |TaskManager| of the task. If None, the manager is initialized from the config file.
+
+        Return: |AbinitInput| object.
+        """
+        if tolerance is None:
+            tolerance = {"tolwfr": 1.0e-22}
+
+        if len(tolerance) != 1 or any(k not in _TOLVARS for k in tolerance):
+            raise self.Error(f"Invalid {tolerance=}")
+
+        if "tolvrs" in tolerance:
+            raise self.Error("tolvrs should not be used in a DKDE calculation")
+
+        # See Dataset 6 of https://docs.abinit.org/tests/tutorespfn/Input/tnlo_6.abi
+        dkde_input = self.new_with_vars(
+            qpt=(0, 0, 0),  # q-wavevector.
+            kptopt=kptopt,  # 2 to take into account time-reversal symmetry.
+            iscf=-3,  # The d2/dkde perturbation is treated in a non-self-consistent way
+            rf2_dkde=rf2_dkde,
+            prepanl=1,  # Compute only the directions needed by the non-linear calculation.
+            useylm=1,  # Required by rf2_dkde.
+            occopt=1,  # Required by the non-linear driver (optdriver=5, usepead=0).
+            prtwf=1,  # Save the 2nd-order WF on disk, they will be read by the DTE task.
+            # The DKDE calculation always reads the d2/dkdk wavefunctions produced by a previous
+            # DKDK run (getdkdk in the multi-dataset mode, irddkdk in the flow mode).
+            irddkdk=1,
+            comment="Input file for DKDE calculation.",
+        )
+
+        dkde_input.pop_tolerances()
+        dkde_input.set_vars(tolerance)
+
+        return dkde_input
+
     def make_ddepert_input(self, perturbation, use_symmetries=True, tolerance=None, manager=None) -> AbinitInput:
         """
         Returns |AbinitInput| for the calculation of an electric field perturbation.
@@ -2555,6 +2601,62 @@ with the Abinit version you are using? Please contact the AbiPy developers."""
             inp.pop_tolerances()
 
         return multi
+
+    def make_dte_fulldfpt_input(self, ixc=None, manager=None) -> AbinitInput:
+        """
+        Return a single |AbinitInput| for the DTE calculation in the full-DFPT formalism
+        (usepead=0, i.e. the electric field is treated analytically, DAPE formalism of
+        Veithen et al. 2005) for the static purely electric (EEE) non-linear response.
+
+        Contrary to the PEAD implementation (usepead=1, see `make_dte_inputs`), a single
+        input is returned with the three electric-field perturbations activated and all
+        directions (d3e_pert*_dir defaults to 1 1 1): the non-linear driver loops over
+        the 27 (idir1, idir2, idir3) triples internally. This input requires the outputs
+        of the DDK, DDE, DKDK and DKDE runs to be available on disk.
+
+        This function should be called with an input that represents a GS run.
+
+        Args:
+            ixc: Value of ixc variable. Used to overwrite the default value read from pseudos.
+            manager: |TaskManager| of the task. If None, the manager is initialized from the config file.
+
+        Return: |AbinitInput| object.
+        """
+        inp = self.deepcopy()
+        inp.pop_irdvars()
+
+        # non-linear calculations do not accept more bands than those in the valence. Set the correct values.
+        # Do this as last, so not to interfere with the the generation of the other steps.
+        nval = inp.structure.num_valence_electrons(inp.pseudos)
+        nval -= inp.get("charge", 0)
+        nband = int(round(nval / 2))
+        inp.set_vars(nband=nband)
+        inp.pop("nbdbuf", None)
+
+        if ixc is not None:
+            inp.set_vars(ixc=int(ixc))
+
+        # See Dataset 7 of https://docs.abinit.org/tests/tutorespfn/Input/tnlo_6.abi
+        inp.set_vars(
+            nqpt=1,  # One wavevector is to be considered
+            qpt=(0, 0, 0),  # q-wavevector.
+            optdriver=5,  # non-linear response functions, using the 2n+1 theorem.
+            usepead=0,  # full DFPT: the electric field is treated analytically.
+            # Purely electric (EEE) third-order derivatives: no phonon perturbation.
+            d3e_pert1_elfd=1,
+            d3e_pert2_elfd=1,
+            d3e_pert3_elfd=1,
+            d3e_pert1_phon=0,
+            d3e_pert2_phon=0,
+            d3e_pert3_phon=0,
+            kptopt=2,  # Take into account time-reversal symmetry.
+            occopt=1,  # Required by optdriver=5 with usepead=0.
+            comment="Input file for DTE calculation in the full-DFPT (usepead=0) formalism.",
+        )
+
+        inp.pop_tolerances()
+
+        return inp
 
     def make_bec_inputs(self, tolerance=None, prepalw=0, manager=None) -> MultiDataset:
         """
